@@ -1,0 +1,17 @@
+# Burp projects and generated captures may contain live credentials.
+*.burp
+*.burp.json
+*.har
+*_part[0-9][0-9][0-9].json
+
+# Local generated output
+/out/
+/out*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
