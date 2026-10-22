@@ -6,7 +6,6 @@ import (
 	"compress/zlib"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 )
@@ -24,18 +23,26 @@ type carvedMark struct {
 	kind   string
 }
 
-func carveBuffer(buf []byte, baseOffset int64, maxBody int, depth int) []CarvedFrame {
+func carveBuffer(buf []byte, baseOffset int64, maxBody int, depth int,
+	progress *progressBar, start, end float64) []CarvedFrame {
+	progress.Update("Scanning request markers", start)
 	marks := []carvedMark{}
 	for _, match := range requestSearchRE.FindAllIndex(buf, -1) {
 		marks = append(marks, carvedMark{offset: match[0], kind: "request"})
 	}
+	progress.Update("Response markers", start+(end-start)*0.2)
 	for _, match := range responseSearchRE.FindAllIndex(buf, -1) {
 		marks = append(marks, carvedMark{offset: match[0], kind: "response"})
 	}
 	sort.SliceStable(marks, func(i, j int) bool { return marks[i].offset < marks[j].offset })
+	progress.Update("Carving HTTP frames", start+(end-start)*0.5)
 
 	found := []CarvedFrame{}
 	for index, mark := range marks {
+		if len(marks) > 0 && (index == 0 || index%128 == 0) {
+			progress.Update("Carving HTTP frames", start+(end-start)*0.5+
+				(end-start)*0.5*float64(index)/float64(len(marks)))
+		}
 		limit := 0
 		if index+1 < len(marks) {
 			limit = marks[index+1].offset - mark.offset
@@ -55,6 +62,7 @@ func carveBuffer(buf []byte, baseOffset int64, maxBody int, depth int) []CarvedF
 			Message: parsed, Warnings: parsed.Warnings, Depth: depth,
 		})
 	}
+	progress.Update("Carved HTTP frames", end)
 	return found
 }
 
@@ -63,11 +71,15 @@ type compressedStream struct {
 	Data   []byte
 }
 
-func findCompressedStreams(buf []byte, limit int) []compressedStream {
+func findCompressedStreams(buf []byte, limit int, progress *progressBar, start, end float64) []compressedStream {
 	out := []compressedStream{}
 	n := len(buf)
 	window := 8_000_000
+	progress.Update("Scanning compressed data", start)
 	for i := 0; i+2 < n; i++ {
+		if i%(1<<20) == 0 {
+			progress.Update("Scanning compressed data", start+(end-start)*float64(i)/float64(n))
+		}
 		b0, b1, b2 := buf[i], buf[i+1], buf[i+2]
 		var decompressed []byte
 		var err error
@@ -99,6 +111,7 @@ func findCompressedStreams(buf []byte, limit int) []compressedStream {
 			out = append(out, compressedStream{Offset: int64(i), Data: decompressed})
 		}
 	}
+	progress.Update("Compressed scan done", end)
 	return out
 }
 
@@ -131,24 +144,23 @@ func pairCarved(found []CarvedFrame, source string) []*Exchange {
 	return items
 }
 
-func readBurpFallback(path string, maxBody int, warnings *[]string) ([]*Exchange, string, *ExtractionResult) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		*warnings = append(*warnings, fmt.Sprintf("could not read input: %s", err))
-		return []*Exchange{}, "frame-carver", &ExtractionResult{
-			Collaborator: emptyCollaborator("only payload domains are recoverable in fallback mode"),
-			Repeater:     emptyRepeater(),
-			Coverage:     map[string]any{},
-		}
-	}
-	found := carveBuffer(data, 0, maxBody, 0)
+func readBurpFallbackData(data []byte, maxBody int, warnings *[]string,
+	progress *progressBar) ([]*Exchange, string, *ExtractionResult) {
+	found := carveBuffer(data, 0, maxBody, 0, progress, 20, 42)
 	compressed := 0
 	extraCollaborator := map[string]bool{}
-	for _, stream := range findCompressedStreams(data, 64_000_000) {
+	streams := findCompressedStreams(data, 64_000_000, progress, 42, 62)
+	for index, stream := range streams {
 		for _, match := range collaboratorRE.FindAllString(string(stream.Data), -1) {
 			extraCollaborator[strings.ToLower(match)] = true
 		}
-		sub := carveBuffer(stream.Data, stream.Offset, maxBody, 1)
+		start := 62.0
+		end := 68.0
+		if len(streams) > 0 {
+			start += (end - start) * float64(index) / float64(len(streams))
+			end = 62 + 6*float64(index+1)/float64(len(streams))
+		}
+		sub := carveBuffer(stream.Data, stream.Offset, maxBody, 1, progress, start, end)
 		if len(sub) > 0 {
 			compressed++
 			found = append(found, sub...)
@@ -157,7 +169,9 @@ func readBurpFallback(path string, maxBody int, warnings *[]string) ([]*Exchange
 	if compressed > 0 {
 		*warnings = append(*warnings, fmt.Sprintf("recovered messages from %d compressed blob(s)", compressed))
 	}
+	progress.Update("Pairing carved messages", 72)
 	items := pairCarved(found, "unknown")
+	progress.Update("Scanning domains", 78)
 	collaboratorSet := map[string]bool{}
 	for _, match := range collaboratorRE.FindAllString(string(data), -1) {
 		collaboratorSet[strings.ToLower(match)] = true
@@ -182,19 +196,37 @@ func readBurpFallback(path string, maxBody int, warnings *[]string) ([]*Exchange
 		"framed_http_records": len(found), "unattributed_frames": len(found),
 		"collaborator_http_interactions": 0,
 	}
+	progress.Update("Fallback complete", 88)
 	return items, "frame-carver", &ExtractionResult{
 		Collaborator: collaborator, Repeater: emptyRepeater(), Coverage: coverage,
 	}
 }
 
-func readBurp(path string, maxBody int, warnings *[]string) ([]*Exchange, string, *ExtractionResult) {
-	project, err := NewBurpProject(path)
+func readBurpFallback(path string, maxBody int, warnings *[]string) ([]*Exchange, string, *ExtractionResult) {
+	data, err := readInputFile(path, nil)
+	if err != nil {
+		*warnings = append(*warnings, fmt.Sprintf("could not read input: %s", err))
+		return []*Exchange{}, "frame-carver", &ExtractionResult{
+			Collaborator: emptyCollaborator("only payload domains are recoverable in fallback mode"),
+			Repeater:     emptyRepeater(),
+			Coverage:     map[string]any{},
+		}
+	}
+	return readBurpFallbackData(data, maxBody, warnings, nil)
+}
+
+func readBurpData(data []byte, maxBody int, warnings *[]string,
+	progress *progressBar) ([]*Exchange, string, *ExtractionResult) {
+	project, err := NewBurpProjectFromBytes(data)
 	if err == nil {
+		project.progress = progress
+		progress.Update("Parsing Burp heap", 20)
 		var result *ExtractionResult
 		err = catchFormat(func() {
 			result = project.extract(maxBody, warnings)
 		})
 		if err == nil && result != nil && len(result.Items) > 0 {
+			progress.Update("Burp heap parsed", 90)
 			return result.Items, "burp-heap", result
 		}
 		if err != nil {
@@ -206,5 +238,14 @@ func readBurp(path string, maxBody int, warnings *[]string) ([]*Exchange, string
 		*warnings = append(*warnings, fmt.Sprintf("structural parser failed (%s); falling back to frame carver", err))
 	}
 
-	return readBurpFallback(path, maxBody, warnings)
+	progress.Update("Using frame carver", 20)
+	return readBurpFallbackData(data, maxBody, warnings, progress)
+}
+
+func readBurp(path string, maxBody int, warnings *[]string) ([]*Exchange, string, *ExtractionResult) {
+	data, err := readInputFile(path, nil)
+	if err != nil {
+		return readBurpFallback(path, maxBody, warnings)
+	}
+	return readBurpData(data, maxBody, warnings, nil)
 }

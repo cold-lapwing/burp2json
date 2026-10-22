@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +36,7 @@ type cliOptions struct {
 	redact     bool
 	chunkItems int
 	noSummary  bool
+	noProgress bool
 	help       bool
 }
 
@@ -57,6 +59,7 @@ Options:
       --redact          redact auth headers, cookies, JWTs, secret-looking fields
       --chunk-items N   split into files of N items each
       --no-summary      omit the summary object
+      --no-progress     disable the progress bar
   -h, --help            show this help
 
 Examples:
@@ -65,6 +68,8 @@ Examples:
   burp2json --host example.com proxy-export.xml
 
 The input file is opened read-only and is never modified.
+Progress is shown on stderr for files of 1 MiB or more on interactive terminals.
+Use --no-progress to disable it.
 Use only on data from targets you are authorised to test.
 `)
 }
@@ -159,6 +164,8 @@ func parseArgs(argv []string) (cliOptions, error) {
 			options.chunkItems = number
 		case "--no-summary":
 			options.noSummary = true
+		case "--no-progress":
+			options.noProgress = true
 		default:
 			return options, fmt.Errorf("unknown option %q", arg)
 		}
@@ -178,7 +185,46 @@ func parseArgs(argv []string) (cliOptions, error) {
 	return options, nil
 }
 
-func detectFormat(path string) string {
+func readInputFile(path string, progress *progressBar) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if progress == nil || !progress.enabled {
+		return io.ReadAll(file)
+	}
+
+	total := info.Size()
+	progress.Bytes("Reading input", 0, total, 0, 20)
+	var out bytes.Buffer
+	if total > 0 && total <= int64(^uint(0)>>1) {
+		out.Grow(int(total))
+	}
+	buffer := make([]byte, 1<<20)
+	var done int64
+	for {
+		count, readErr := file.Read(buffer)
+		if count > 0 {
+			_, _ = out.Write(buffer[:count])
+			done += int64(count)
+			progress.Bytes("Reading input", done, total, 0, 20)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+	return out.Bytes(), nil
+}
+
+func detectFormatData(path string, data []byte) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".burp":
 		return "burp"
@@ -187,18 +233,15 @@ func detectFormat(path string) string {
 	case ".xml":
 		return "xml"
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return "burp"
+	head := data
+	if len(head) > 512 {
+		head = head[:512]
 	}
-	defer file.Close()
-	head := make([]byte, 512)
-	count, _ := file.Read(head)
-	head = []byte(strings.TrimLeft(string(head[:count]), " \t\r\n"))
-	if strings.HasPrefix(string(head), "<?xml") || strings.HasPrefix(string(head), "<items") {
+	head = bytes.TrimLeft(head, " \t\r\n")
+	if bytes.HasPrefix(head, []byte("<?xml")) || bytes.HasPrefix(head, []byte("<items")) {
 		return "xml"
 	}
-	if strings.HasPrefix(string(head), "{") {
+	if bytes.HasPrefix(head, []byte("{")) {
 		return "har"
 	}
 	if len(head) >= 4 && head[0] == 0x66 && head[1] == 0x85 && head[2] == 0x82 && head[3] == 0x80 {
@@ -207,11 +250,12 @@ func detectFormat(path string) string {
 	return "burp"
 }
 
-func writeJSON(path string, document *Document) error {
+func writeJSON(path string, document *Document, progress *progressBar, start, end float64) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
+	progress.Update("Writing output", start)
 	encoder := json.NewEncoder(file)
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
@@ -219,6 +263,9 @@ func writeJSON(path string, document *Document) error {
 	closeErr := file.Close()
 	if encodeErr != nil {
 		return encodeErr
+	}
+	if closeErr == nil {
+		progress.Update("Writing output", end)
 	}
 	return closeErr
 }
@@ -317,9 +364,17 @@ func run(argv []string) int {
 		return 2
 	}
 
+	progress := newProgressBar(progressEnabled(info, options.noProgress))
+	defer progress.Close()
+	data, err := readInputFile(options.input, progress)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+
 	format := options.format
 	if format == "" {
-		format = detectFormat(options.input)
+		format = detectFormatData(options.input, data)
 	}
 	warnings := []string{}
 	extra := &ExtractionResult{
@@ -331,12 +386,13 @@ func run(argv []string) int {
 	var method string
 	switch format {
 	case "burp":
-		rawItems, method, extra = readBurp(options.input, options.maxBody, &warnings)
+		rawItems, method, extra = readBurpData(data, options.maxBody, &warnings, progress)
 	case "xml":
-		rawItems, method = readXML(options.input, options.maxBody, &warnings)
+		rawItems, method = readXMLData(data, options.maxBody, &warnings, progress)
 	case "har":
-		rawItems, method = readHAR(options.input, options.maxBody, &warnings)
+		rawItems, method = readHARData(data, options.maxBody, &warnings, progress)
 	}
+	progress.Update("Finalizing items", 90)
 	if format == "burp" && method == "burp-heap" {
 		rawItems = mergeExchanges(rawItems)
 	}
@@ -352,11 +408,7 @@ func run(argv []string) int {
 			"then run this tool on the XML export.")
 	}
 
-	data, err := os.ReadFile(options.input)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return 1
-	}
+	progress.Update("Building document", 94)
 	meta := makeMeta(options, method, format, data, items, extra, warnings)
 	document := &Document{
 		AIInstructions: aiInstructions,
@@ -431,19 +483,22 @@ func run(argv []string) int {
 				partDocument.Coverage = document.Coverage
 			}
 			path := fmt.Sprintf("%s_part%03d%s", base, partNumber, extension)
-			if err := writeJSON(path, partDocument); err != nil {
+			partStart := 94 + 6*float64(partIndex)/float64(parts)
+			partEnd := 94 + 6*float64(partNumber)/float64(parts)
+			if err := writeJSON(path, partDocument, progress, partStart, partEnd); err != nil {
 				fmt.Fprintf(os.Stderr, "error writing %s: %s\n", path, err)
 				return 1
 			}
 			written = append(written, path)
 		}
 	} else {
-		if err := writeJSON(outPath, document); err != nil {
+		if err := writeJSON(outPath, document, progress, 94, 100); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing %s: %s\n", outPath, err)
 			return 1
 		}
 		written = append(written, outPath)
 	}
+	progress.Done()
 
 	fmt.Fprintf(os.Stderr, "method=%s items=%d\n", method, len(items))
 	for _, warning := range warnings {

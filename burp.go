@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -81,16 +80,9 @@ type BurpObject struct {
 }
 
 type BurpProject struct {
-	Data   []byte
-	Header BurpHeader
-}
-
-func NewBurpProject(path string) (*BurpProject, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return NewBurpProjectFromBytes(data)
+	Data     []byte
+	Header   BurpHeader
+	progress *progressBar
 }
 
 func NewBurpProjectFromBytes(data []byte) (*BurpProject, error) {
@@ -105,6 +97,12 @@ func NewBurpProjectFromBytes(data []byte) (*BurpProject, error) {
 
 func (p *BurpProject) fail(format string, args ...any) {
 	panic(BurpFormatError{Message: fmt.Sprintf(format, args...)})
+}
+
+func (p *BurpProject) report(label string, percent float64) {
+	if p.progress != nil {
+		p.progress.Update(label, percent)
+	}
 }
 
 func (p *BurpProject) need(offset int64, size int64) {
@@ -647,6 +645,7 @@ func (p *BurpProject) firstAddress(obj *BurpObject, fields []byte) int64 {
 }
 
 func (p *BurpProject) extractProxy(warnings *[]string) []*Exchange {
+	p.report("Extracting Proxy history", 20)
 	root := p.parseObject(p.Header.ProjectRoot, 16)
 	proxyAddress := p.readAddress(root, 1)
 	if proxyAddress == 0 {
@@ -665,7 +664,11 @@ func (p *BurpProject) extractProxy(warnings *[]string) []*Exchange {
 			*warnings = append(*warnings, fmt.Sprintf("Proxy collection %d could not be decoded: %s", collectionField, err))
 			continue
 		}
-		for _, itemAddress := range items {
+		for itemIndex, itemAddress := range items {
+			if len(items) > 0 {
+				p.report("Extracting Proxy history", 20+6*float64(collectionField)+
+					6*float64(itemIndex+1)/float64(len(items)))
+			}
 			if itemAddress == 0 || seen[itemAddress] {
 				continue
 			}
@@ -710,10 +713,12 @@ func (p *BurpProject) extractProxy(warnings *[]string) []*Exchange {
 			}
 		}
 	}
+	p.report("Proxy history extracted", 32)
 	return out
 }
 
 func (p *BurpProject) extractRepeater(warnings *[]string) ([]*Exchange, RepeaterInfo) {
+	p.report("Extracting Repeater tabs", 32)
 	root := p.parseObject(p.Header.ProjectRoot, 16)
 	repeaterAddress := p.readAddress(root, 2)
 	if repeaterAddress == 0 {
@@ -760,7 +765,10 @@ func (p *BurpProject) extractRepeater(warnings *[]string) ([]*Exchange, Repeater
 			*warnings = append(*warnings, fmt.Sprintf("Repeater tab collection could not be decoded: %s", err))
 			tabAddresses = []int64{}
 		}
-		for _, tabAddress := range tabAddresses {
+		for tabIndex, tabAddress := range tabAddresses {
+			if len(tabAddresses) > 0 {
+				p.report("Extracting Repeater tabs", 34+8*float64(tabIndex+1)/float64(len(tabAddresses)))
+			}
 			if tabAddress == 0 {
 				continue
 			}
@@ -824,10 +832,12 @@ func (p *BurpProject) extractRepeater(warnings *[]string) ([]*Exchange, Repeater
 			}
 		}
 	}
+	p.report("Repeater tabs extracted", 42)
 	return out, RepeaterInfo{Tabs: tabsOut, Groups: groups}
 }
 
 func (p *BurpProject) extractSiteMap(warnings *[]string) []*Exchange {
+	p.report("Extracting Site Map", 42)
 	root := p.parseObject(p.Header.ProjectRoot, 16)
 	targetAddress := p.readAddress(root, 3)
 	if targetAddress == 0 {
@@ -852,7 +862,10 @@ func (p *BurpProject) extractSiteMap(warnings *[]string) []*Exchange {
 	out := []*Exchange{}
 	seenMessages := map[int64]bool{}
 	decodedEntries := 0
-	for _, bucketAddress := range buckets {
+	for bucketIndex, bucketAddress := range buckets {
+		if len(buckets) > 0 {
+			p.report("Extracting Site Map", 42+14*float64(bucketIndex+1)/float64(len(buckets)))
+		}
 		if bucketAddress == 0 {
 			continue
 		}
@@ -917,6 +930,7 @@ func (p *BurpProject) extractSiteMap(warnings *[]string) []*Exchange {
 	if *expectedSize != 0 && decodedEntries != *expectedSize {
 		*warnings = append(*warnings, fmt.Sprintf("Target index reported %d entries; decoded %d", *expectedSize, decodedEntries))
 	}
+	p.report("Site Map extracted", 56)
 	return out
 }
 
@@ -931,17 +945,23 @@ func (p *BurpProject) scanFrames() []Frame {
 		offset int
 		kind   string
 	}
+	p.report("Scanning HTTP frames", 56)
 	marks := []mark{}
 	for _, match := range requestSearchRE.FindAllIndex(p.Data, -1) {
 		marks = append(marks, mark{offset: match[0], kind: "request"})
 	}
+	p.report("Scanning HTTP frames", 60)
 	for _, match := range responseSearchRE.FindAllIndex(p.Data, -1) {
 		marks = append(marks, mark{offset: match[0], kind: "response"})
 	}
+	p.report("Scanning HTTP frames", 64)
 	sort.SliceStable(marks, func(i, j int) bool { return marks[i].offset < marks[j].offset })
 	frames := []Frame{}
 	seen := map[int64]bool{}
-	for _, current := range marks {
+	for markIndex, current := range marks {
+		if len(marks) > 0 && markIndex%(1<<14) == 0 {
+			p.report("Scanning HTTP frames", 64+6*float64(markIndex)/float64(len(marks)))
+		}
 		record := int64(current.offset) - 8
 		if record < burpHeaderSize || seen[record] {
 			continue
@@ -964,14 +984,17 @@ func (p *BurpProject) scanFrames() []Frame {
 		seen[record] = true
 		frames = append(frames, Frame{Address: record, Kind: current.kind, Payload: payload})
 	}
+	p.report("HTTP frames scanned", 70)
 	return frames
 }
 
 func (p *BurpProject) collaborator(frames []Frame, warnings *[]string) Collaborator {
+	p.report("Collaborator recovery", 70)
 	domains := map[string]bool{}
 	for _, match := range collaboratorRE.FindAllString(string(p.Data), -1) {
 		domains[strings.ToLower(match)] = true
 	}
+	p.report("Collaborator recovery", 72)
 	requests := []Frame{}
 	responses := []Frame{}
 	for _, frame := range frames {
@@ -989,9 +1012,13 @@ func (p *BurpProject) collaborator(frames []Frame, warnings *[]string) Collabora
 			domains[strings.ToLower(match)] = true
 		}
 	}
+	p.report("Collaborator recovery", 74)
 	interactions := []Interaction{}
 	usedResponses := map[int64]bool{}
-	for _, request := range requests {
+	for requestIndex, request := range requests {
+		if len(requests) > 0 {
+			p.report("Collaborator recovery", 74+8*float64(requestIndex+1)/float64(len(requests)))
+		}
 		var response *Frame
 		bestDistance := int64(0)
 		for index := range responses {
@@ -1052,6 +1079,7 @@ func (p *BurpProject) collaborator(frames []Frame, warnings *[]string) Collabora
 	if len(interactions) > 0 {
 		types = append(types, "HTTP")
 	}
+	p.report("Collaborator recovered", 82)
 	return Collaborator{
 		DomainsSeen: domainList, InteractionTypesSeen: types, Interactions: interactions,
 		Note: "HTTP interactions are recovered from framed request/response records. " +
@@ -1085,6 +1113,7 @@ func (p *BurpProject) extract(maxBody int, warnings *[]string) *ExtractionResult
 	}
 
 	collaborator := p.collaborator(frames, warnings)
+	p.report("Frame attribution", 84)
 	for _, interaction := range collaborator.Interactions {
 		knownAddresses[interaction.RequestAddress] = true
 		if interaction.ResponseAddress != nil {
@@ -1139,6 +1168,7 @@ func (p *BurpProject) extract(maxBody int, warnings *[]string) *ExtractionResult
 		"unattributed_frames":            len(unattributed),
 		"collaborator_http_interactions": len(collaborator.Interactions),
 	}
+	p.report("Burp extraction complete", 88)
 	return &ExtractionResult{
 		Items: all, Collaborator: collaborator, Repeater: repeaterInfo,
 		Coverage: coverage, ProjectName: projectName, Header: &p.Header,

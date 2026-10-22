@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -78,18 +77,28 @@ func parseTimeValue(value string) *int64 {
 }
 
 func readXML(path string, maxBody int, warnings *[]string) ([]*Exchange, string) {
-	data, err := os.ReadFile(path)
+	data, err := readInputFile(path, nil)
 	if err != nil {
 		*warnings = append(*warnings, fmt.Sprintf("could not read XML: %s", err))
 		return []*Exchange{}, "burp-xml"
 	}
+	return readXMLData(data, maxBody, warnings, nil)
+}
+
+func readXMLData(data []byte, maxBody int, warnings *[]string, progress *progressBar) ([]*Exchange, string) {
+	progress.Update("Parsing XML export", 20)
 	var document xmlItems
 	if err := xml.Unmarshal(data, &document); err != nil {
 		*warnings = append(*warnings, fmt.Sprintf("could not parse XML: %s", err))
+		progress.Update("XML export parsed", 88)
 		return []*Exchange{}, "burp-xml"
 	}
+	progress.Update("Parsing XML export", 30)
 	items := []*Exchange{}
-	for _, item := range document.Items {
+	for itemIndex, item := range document.Items {
+		if len(document.Items) > 0 {
+			progress.Update("Parsing XML export", 30+58*float64(itemIndex+1)/float64(len(document.Items)))
+		}
 		requestRaw := xmlRaw(item.Request)
 		responseRaw := xmlRaw(item.Response)
 		source := strings.TrimSpace(item.Type)
@@ -131,6 +140,7 @@ func readXML(path string, maxBody int, warnings *[]string) ([]*Exchange, string)
 		}
 		items = append(items, exchange)
 	}
+	progress.Update("XML export parsed", 88)
 	return items, "burp-xml"
 }
 
@@ -187,13 +197,18 @@ func convertHARHeaders(headers []harHeader) [][2]string {
 	return out
 }
 
-func readHARBytes(raw []byte, maxBody int) []*Exchange {
+func readHARBytes(raw []byte, maxBody int, progress *progressBar) []*Exchange {
+	progress.Update("Parsing HAR", 20)
 	var document harDocument
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return nil
 	}
+	progress.Update("Parsing HAR", 30)
 	items := []*Exchange{}
-	for _, entry := range document.Log.Entries {
+	for entryIndex, entry := range document.Log.Entries {
+		if len(document.Log.Entries) > 0 {
+			progress.Update("Parsing HAR", 30+58*float64(entryIndex+1)/float64(len(document.Log.Entries)))
+		}
 		requestBody := encodeBody(nil, maxBody)
 		if entry.Request.PostData != nil {
 			requestBody = encodeBody([]byte(entry.Request.PostData.Text), maxBody)
@@ -251,16 +266,21 @@ func readHARBytes(raw []byte, maxBody int) []*Exchange {
 	return items
 }
 
-func readHAR(path string, maxBody int, warnings *[]string) ([]*Exchange, string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		*warnings = append(*warnings, fmt.Sprintf("could not read HAR: %s", err))
-		return []*Exchange{}, "har"
-	}
-	items := readHARBytes(data, maxBody)
+func readHARData(data []byte, maxBody int, warnings *[]string, progress *progressBar) ([]*Exchange, string) {
+	items := readHARBytes(data, maxBody, progress)
 	if items == nil {
 		*warnings = append(*warnings, "could not parse HAR JSON")
 		items = []*Exchange{}
 	}
+	progress.Update("HAR parsed", 88)
 	return items, "har"
+}
+
+func readHAR(path string, maxBody int, warnings *[]string) ([]*Exchange, string) {
+	data, err := readInputFile(path, nil)
+	if err != nil {
+		*warnings = append(*warnings, fmt.Sprintf("could not read HAR: %s", err))
+		return []*Exchange{}, "har"
+	}
+	return readHARData(data, maxBody, warnings, nil)
 }

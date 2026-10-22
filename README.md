@@ -27,6 +27,7 @@ Brotli decoder for `Content-Encoding: br`.
 - Builds an application summary (hosts, endpoints, parameters, cookies, statuses,
   technologies, missing security headers, redirects, errors).
 - Can split output into numbered parts for context-window limits.
+- Shows a progress bar on stderr for large inputs on interactive terminals.
 - Best-effort `--redact` mode for auth headers, cookies, JWTs, and secret-looking
   fields.
 
@@ -70,6 +71,11 @@ burp2json capture.har -o capture.json
 The input file is opened read-only and is never modified. If `-o` is omitted the
 output is written next to the input as `<input>.json`.
 
+For inputs of 1 MiB or more, an interactive terminal also shows a progress bar on
+stderr while the file is read, parsed, and written. Progress is disabled
+automatically when stderr is redirected, and can be forced off with
+`--no-progress`.
+
 ## CLI options
 
 | Option | Meaning |
@@ -81,6 +87,7 @@ output is written next to the input as `<input>.json`.
 | `--redact` | Redact sensitive headers, cookies, JWTs, and secret-looking fields. |
 | `--chunk-items N` | Write `*_part001.json`, `*_part002.json`, ... with `N` items each. |
 | `--no-summary` | Omit the top-level `summary` object. |
+| `--no-progress` | Disable the progress bar even on an interactive terminal. |
 
 ## Output shape
 
@@ -365,7 +372,8 @@ Key format facts worth preserving:
 ## Repository layout
 
 ```text
-main.go       CLI, format detection, output and chunk writing
+main.go       CLI, input reading, format detection, output and chunk writing
+progress.go   terminal progress bar
 model.go      shared JSON types
 httpmsg.go    HTTP parsing, body decoding, URL inference
 burp.go       structural schema-217 heap parser
