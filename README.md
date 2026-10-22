@@ -2,11 +2,11 @@
 
 Convert Burp Suite project data into structured, AI-readable JSON.
 
-`burp2json` is a single-file Python 3 tool for turning a Burp Suite engagement into
+`burp2json` is a Go command-line tool for turning a Burp Suite engagement into
 something an LLM or a script can reason about: ordered headers, decoded bodies,
 comments, highlights, timestamps, Site Map entries, Repeater tabs, and Collaborator
-HTTP interactions. It is read-only and uses only the standard library (with optional
-`brotli` support for `Content-Encoding: br`).
+HTTP interactions. It is read-only and uses the Go standard library plus a small
+Brotli decoder for `Content-Encoding: br`.
 
 > Only use this on targets you are authorised to test. The output can contain
 > credentials, session tokens, personal data, and full response bodies. Review it
@@ -17,7 +17,7 @@ HTTP interactions. It is read-only and uses only the standard library (with opti
 - Reads Burp project files (`.burp`) structurally, without requiring Burp itself.
 - Also reads Burp "Save items" XML exports and HAR files.
 - Preserves header order and duplicate headers as `[name, value]` pairs.
-- Decodes `gzip`, `deflate`, `br` (when `brotli` is installed), and chunked bodies.
+- Decodes `gzip`, `deflate`, Brotli (`br`), and chunked bodies.
 - Emits binary bodies as base64 instead of corrupting them.
 - Recovers Proxy history, Repeater tabs, Target Site Map entries, and Collaborator
   HTTP interactions where the project stores them.
@@ -32,42 +32,43 @@ HTTP interactions. It is read-only and uses only the standard library (with opti
 
 ## Install
 
-Python 3.9+ is sufficient. No third-party package is required.
+Requires Go 1.22 or newer.
 
 ```bash
-git clone <repo> burp2json
-cd burp2json
-python3 burp2json.py --help
+go install github.com/cold-lapwing/burp2json@latest
 ```
 
-Optional, for Brotli-encoded response bodies:
+The binary is installed into `$(go env GOPATH)/bin` (usually `~/go/bin`). Add that
+directory to your `PATH` if it is not already there. You can also build from a clone:
 
 ```bash
-python3 -m pip install brotli
+git clone https://github.com/cold-lapwing/burp2json
+cd burp2json
+go build -o burp2json .
 ```
 
 ## Quick start
 
 ```bash
 # Burp project -> JSON
-python3 burp2json.py engagement.burp -o engagement.json
+burp2json engagement.burp -o engagement.json
 
 # Redact common secrets before sharing
-python3 burp2json.py engagement.burp -o engagement.redacted.json --redact
+burp2json engagement.burp -o engagement.redacted.json --redact
 
 # Keep one host only
-python3 burp2json.py engagement.burp -o api.json --host api.example.com
+burp2json engagement.burp -o api.json --host api.example.com
 
 # Split a large export into 200-item parts
-python3 burp2json.py engagement.burp -o engagement.json --chunk-items 200
+burp2json engagement.burp -o engagement.json --chunk-items 200
 
 # XML or HAR exports
-python3 burp2json.py saved-items.xml -o saved.json
-python3 burp2json.py capture.har -o capture.json
+burp2json saved-items.xml -o saved.json
+burp2json capture.har -o capture.json
 ```
 
-The input file is never modified. If `-o` is omitted the output is written next to
-the input as `<input>.json`.
+The input file is opened read-only and is never modified. If `-o` is omitted the
+output is written next to the input as `<input>.json`.
 
 ## CLI options
 
@@ -88,7 +89,7 @@ the input as `<input>.json`.
   "ai_instructions": "Guidance for an LLM reading this file...",
   "meta": {
     "tool": "burp2json",
-    "tool_version": "1.1.0",
+    "tool_version": "2.0.0",
     "source_file": "engagement.burp",
     "source_sha256": "...",
     "source_size": 16777216,
@@ -341,16 +342,16 @@ JavaScript, or unusual header names. Always review the output before sharing it.
 
 ## Testing
 
-Tests use only the standard library and include a synthetic schema-217 heap fixture.
+Tests use only the Go standard library and include a synthetic schema-217 heap fixture.
 
 ```bash
-python3 -m unittest discover -s tests -v
+go test ./...
 ```
 
 With RTK installed, the same suite can be run through its test filter:
 
 ```bash
-rtk test python3 -m unittest discover -s tests -v
+rtk test go test ./...
 ```
 
 The suite covers:
@@ -392,10 +393,17 @@ Key format facts worth preserving:
 ## Repository layout
 
 ```text
-burp2json.py              CLI and parser (single file)
-tests/test_burp2json.py   stdlib unittest suite and synthetic heap fixture
-README.md                 this document
-.gitignore                ignores .burp files, generated JSON, and caches
+main.go       CLI, format detection, output and chunk writing
+model.go      shared JSON types
+httpmsg.go    HTTP parsing, body decoding, URL inference
+burp.go       structural schema-217 heap parser
+carver.go     fallback byte-level HTTP carver
+xmlhar.go     Burp XML and HAR readers
+transform.go  deduplication, finalisation, redaction, summary
+*_test.go     Go test suite and synthetic heap fixture
+go.mod        module and Brotli dependency
+README.md     this document
+.gitignore    ignores .burp files, generated JSON, and build artifacts
 ```
 
 ## License

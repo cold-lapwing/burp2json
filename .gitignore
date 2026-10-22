@@ -8,10 +8,8 @@
 /out/
 /out*.json
 
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.venv/
-venv/
+# Go build and test artifacts
+/burp2json
+/dist/
+*.test
+coverage.out
