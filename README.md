@@ -340,34 +340,6 @@ material.
 It does **not** reliably redact secrets embedded in free-form response bodies, HTML,
 JavaScript, or unusual header names. Always review the output before sharing it.
 
-## Testing
-
-Tests use only the Go standard library and include a synthetic schema-217 heap fixture.
-
-```bash
-go test ./...
-```
-
-With RTK installed, the same suite can be run through its test filter:
-
-```bash
-rtk test go test ./...
-```
-
-The suite covers:
-
-- heap header parsing and Proxy/Repeater/Site Map/Collaborator extraction;
-- duplicate-header preservation and JSON/form parameter extraction;
-- comment, highlight, timestamp, and service metadata recovery;
-- cross-tool deduplication and `also_seen_in`;
-- redaction of headers, cookie columns, and body parameters;
-- `--host`, `--max-body`, `--chunk-items`, and `--no-summary`;
-- XML and HAR readers;
-- fallback carving;
-- chunked/gzip/deflate decoding and binary-body base64 encoding;
-- read-only behaviour;
-- an integration check for the real sample when it is present (skipped otherwise).
-
 ## Reverse-engineering notes
 
 The `.burp` layout was derived by inspecting the shipped artifact rather than by
