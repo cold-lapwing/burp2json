@@ -1,12 +1,18 @@
 # burp2json
 
-Convert Burp Suite project data into structured, AI-readable JSON.
+Convert Burp Suite project data into token-efficient JSON for LLMs.
 
 `burp2json` is a Go command-line tool for turning a Burp Suite engagement into
 something an LLM or a script can reason about: ordered headers, decoded bodies,
 comments, highlights, timestamps, Site Map entries, Repeater tabs, and Collaborator
 HTTP interactions. It is read-only and uses the Go standard library plus a small
 Brotli decoder for `Content-Encoding: br`.
+
+The default output is `b2j-sir/1`, a schema-once positional format designed for
+LLM context windows. Header names and repeated values are interned, derivable
+fields are removed, and large bodies/values are previewed with a recall sidecar so
+the full data stays out of the main file. `--legacy-json` still emits the old
+verbose shape.
 
 > Only use this on targets you are authorised to test. The output can contain
 > credentials, session tokens, personal data, and full response bodies. Review it
@@ -16,14 +22,22 @@ Brotli decoder for `Content-Encoding: br`.
 
 - Reads Burp project files (`.burp`) structurally, without requiring Burp itself.
 - Also reads Burp "Save items" XML exports and HAR files.
-- Preserves header order and duplicate headers as `[name, value]` pairs.
+- Preserves header order and duplicate headers as flat name/value index pairs.
 - Decodes `gzip`, `deflate`, Brotli (`br`), and chunked bodies.
-- Emits binary bodies as base64 instead of corrupting them.
+- Emits binary bodies as base64 instead of corrupting them, and moves base64
+  bodies to the recall sidecar by default.
+- Uses schema-once positional rows and a global string table to cut structural
+  token overhead.
+- Writes a `<output>.recall.json` sidecar for body/header previews so the main
+  file stays small without losing the previewed values (subject to `--max-body`).
+- Keeps the previous verbose JSON available through `--legacy-json`.
 - Recovers Proxy history, Repeater tabs, Target Site Map entries, and Collaborator
   HTTP interactions where the project stores them.
-- Supports comments, highlight colours, capture timestamps, listener ports, Burp
-  MIME types, and response titles where available.
-- Deduplicates the same exchange across tools and records `also_seen_in`.
+- Supports comments, highlight colours, capture timestamps, and response titles
+  where available. Legacy output also keeps listener ports, Burp MIME types, IPs,
+  and the full metadata map.
+- Deduplicates the same exchange across tools and records `also` in compact output
+  (`also_seen_in` in legacy output).
 - Builds an application summary (hosts, endpoints, parameters, cookies, statuses,
   technologies, missing security headers, redirects, errors).
 - Can split output into numbered parts for context-window limits.
@@ -51,8 +65,14 @@ go build -o burp2json .
 ## Quick start
 
 ```bash
-# Burp project -> JSON
+# Default: compact index + recall sidecar
 burp2json engagement.burp -o engagement.json
+
+# Disable preview caps and inline base64 bodies (still subject to --max-body)
+burp2json engagement.burp -o engagement.full.json --full
+
+# Old verbose JSON shape
+burp2json engagement.burp -o engagement.legacy.json --legacy-json
 
 # Redact common secrets before sharing
 burp2json engagement.burp -o engagement.redacted.json --redact
@@ -60,7 +80,7 @@ burp2json engagement.burp -o engagement.redacted.json --redact
 # Keep one host only
 burp2json engagement.burp -o api.json --host api.example.com
 
-# Split a large export into 200-item parts
+# Split a large export into 200-item parts (each part gets its own recall sidecar)
 burp2json engagement.burp -o engagement.json --chunk-items 200
 
 # XML or HAR exports
@@ -69,7 +89,9 @@ burp2json capture.har -o capture.json
 ```
 
 The input file is opened read-only and is never modified. If `-o` is omitted the
-output is written next to the input as `<input>.json`.
+output is written next to the input as `<input>.json`. When compact mode elides a
+value, the full values are written to `<output>.recall.json` in the same
+directory.
 
 For inputs of 1 MiB or more, an interactive terminal also shows a progress bar on
 stderr while the file is read, parsed, and written. Progress is disabled
@@ -83,6 +105,10 @@ automatically when stderr is redirected, and can be forced off with
 | `-o, --output PATH` | Output JSON path. Default: `<input>.json`. |
 | `--format {burp,xml,har}` | Force the input format instead of auto-detecting. |
 | `--max-body BYTES` | Maximum body bytes kept per message. Default: `200000`. |
+| `--body-preview BYTES` | Bytes of each body kept inline in the compact file. Default: `1024`; `0` keeps full text bodies (base64 still needs `--full`). |
+| `--header-max BYTES` | Maximum bytes per interned header value/comment/title. Default: `512`; `0` keeps full values. |
+| `--full` | Disable compact preview caps and inline base64 bodies (still subject to `--max-body`). |
+| `--legacy-json` | Emit the old verbose JSON document instead of `b2j-sir/1`. |
 | `--host TEXT` | Keep only items whose host contains `TEXT`. Repeatable. |
 | `--redact` | Redact sensitive headers, cookies, JWTs, and secret-looking fields. |
 | `--chunk-items N` | Write `*_part001.json`, `*_part002.json`, ... with `N` items each. |
@@ -91,149 +117,164 @@ automatically when stderr is redirected, and can be forced off with
 
 ## Output shape
 
+The default file is `b2j-sir/1`: JSON with a schema, a global string table, and
+positional rows. It is intentionally optimized for an LLM reader, not for human
+diffing.
+
 ```jsonc
 {
-  "ai_instructions": "Guidance for an LLM reading this file...",
+  "format": "b2j-sir/1",
+  "read": "b2j-sir/1: schema-once JSON for LLMs. ...",
+  "recall": "engagement.recall.json",
   "meta": {
     "tool": "burp2json",
-    "tool_version": "2.0.0",
-    "source_file": "engagement.burp",
-    "source_sha256": "...",
-    "source_size": 16777216,
-    "input_format": "burp",
-    "extraction_method": "burp-heap",
-    "generated_at": "2026-10-22T09:47:40+00:00",
+    "version": "2.1.0",
+    "source": "engagement.burp",
+    "sha256": "...",
+    "bytes": 16777216,
+    "input": "burp",
+    "method": "burp-heap",
+    "at": "2026-10-22T09:47:40.000000+00:00",
     "read_only": true,
-    "item_count": 95,
-    "source_tool_counts": {"proxy": 11, "site-map": 84},
-    "redacted": true,
+    "items": 95,
+    "tools": {"proxy": 11, "site-map": 84},
     "burp": {
       "magic": "0x66858280",
       "outer_version": 1,
-      "schema_current": 217,
-      "project_name": "engagement"
+      "compat": "0x80527974",
+      "schema": 217,
+      "project": "engagement"
     },
-    "warnings": []
+    "warnings": ["242 framed HTTP record(s) were not linked ..."]
   },
+  "schema": {
+    "item": ["id", "tool", "also", "time", "url", "status", "title",
+             "comment", "highlight", "request", "response", "warnings"],
+    "request": ["method", "target", "http_version", "headers",
+                "body", "body_encoding", "orig_bytes", "ref"],
+    "response": ["reason", "http_version", "headers",
+                 "body", "body_encoding", "orig_bytes", "ref"],
+    "interaction": ["type", "host", "method", "path", "response_status",
+                    "response_server", "request", "response"],
+    "host": ["host", "count", "ports", "protocols"],
+    "endpoint": ["host", "method", "path", "count", "statuses", "params"]
+  },
+  "strings": ["site-map", "proxy", "Host", "chatgpt.com", "Cookie", "sid=...",
+              "Content-Type", "text/html"],
+  "items": [
+    [1, 1, [0], 1792661035929, "https://chatgpt.com/", 200, null, null, "none",
+     ["GET", "/", "HTTP/2", [2, 3, 4, 5], "", null, null, null],
+     ["OK", "2", [6, 7], "<!DOCTYPE html>...", null, 651480, "1p"],
+     null]
+  ],
   "summary": {
-    "total_items": 95,
-    "hosts": {"chatgpt.com": 95},
-    "host_details": [
-      {"host": "chatgpt.com", "count": 95, "ports": [443], "protocols": ["https"]}
-    ],
-    "endpoints": [
-      {"host": "chatgpt.com", "method": "GET", "path": "/", "count": 1,
-       "statuses": {"200": 1}, "params": []}
-    ],
-    "parameter_names": ["..."],
+    "total": 95,
+    "hosts": [["chatgpt.com", 95, [443], ["https"]]],
+    "endpoints": [["chatgpt.com", "GET", "/", 1, [[200, 1]], []]],
     "methods": {"GET": 66, "POST": 29},
-    "status_codes": {"200": 81, "202": 9, "302": 3, "403": 2},
+    "status": {"200": 81, "202": 9, "302": 3, "403": 2},
     "content_types": {"application/json": 59},
-    "technology_headers": {},
-    "cookie_names_seen": ["..."],
-    "auth_header_names_seen": ["Authorization"],
-    "responses_missing_security_headers": {},
-    "redirects": [],
-    "client_errors": [],
-    "server_errors": [],
+    "params": ["..."],
+    "cookies": ["..."],
+    "auth": ["Authorization"],
+    "redirects": [[17, 302, "/home"]],
     "highlights": {"none": 11}
   },
   "collaborator": {
-    "domains_seen": ["...oastify.com"],
-    "interaction_types_seen": ["HTTP"],
+    "domains": ["...oastify.com"],
+    "types": ["HTTP"],
     "interactions": [
-      {
-        "type": "HTTP",
-        "host": "...oastify.com",
-        "method": "GET",
-        "path": "/.git/HEAD",
-        "response_status": 200,
-        "response_server": "Burp Collaborator https://burpcollaborator.net/",
-        "request": {"headers": [["Host", "..."]], "body": "", "...": "..."},
-        "response": {"headers": [["Server", "Burp Collaborator ..."]], "...": "..."}
-      }
+      ["HTTP", "...oastify.com", "GET", "/.git/HEAD", 200,
+       "Burp Collaborator https://burpcollaborator.net/",
+       ["GET", "/.git/HEAD", "HTTP/1.1", [2, 3], "", null, null, null],
+       ["OK", "1.1", [4, 5], "<html>...</html>", null, null, null]]
     ]
   },
-  "repeater": {
-    "tabs": [{"address": 14524816, "caption": "1", "uuid": null,
-              "group": null, "pair_count": 0}],
-    "groups": []
-  },
-  "intruder": {"recovered": false, "note": "..."},
-  "scanner": {"recovered": false, "note": "..."},
-  "coverage": {
-    "proxy_items": 11,
-    "repeater_pairs": 0,
-    "site_map_messages": 95,
-    "framed_http_records": 442,
-    "unattributed_frames": 242,
-    "collaborator_http_interactions": 5
-  },
-  "items": [
-    {
-      "id": 1,
-      "source_tool": "proxy",
-      "also_seen_in": ["site-map"],
-      "time": 1792661035929,
-      "time_iso": "2026-10-22T09:23:55.929000+00:00",
-      "url": "https://chatgpt.com/",
-      "host": "chatgpt.com",
-      "port": 443,
-      "protocol": "https",
-      "method": "GET",
-      "path": "/",
-      "status": 200,
-      "comment": "js",
-      "highlight": "none",
-      "metadata": {
-        "entry_id": 2867,
-        "ip": "172.64.155.209",
-        "status": 200,
-        "burp_mime_code": 256,
-        "burp_mime": "HTML",
-        "response_length": 651480,
-        "title": "ChatGPT",
-        "time_epoch_ms": 1792661035929,
-        "listener_port": 8080,
-        "service": {"host": "chatgpt.com", "port": 443, "tls": true},
-        "row_address": 14542034
-      },
-      "request_file_offset": 13320902,
-      "response_file_offset": 122436,
-      "request": {
-        "method": "GET",
-        "target": "/",
-        "path": "/",
-        "http_version": "HTTP/2",
-        "request_line": "GET / HTTP/2",
-        "headers": [["Host", "chatgpt.com"], ["Cookie", "[REDACTED]"]],
-        "cookies": {"session": "[REDACTED]"},
-        "query_params": [],
-        "body_params": [],
-        "body": "",
-        "body_encoding": "utf-8",
-        "body_length": 0,
-        "body_truncated": false
-      },
-      "response": {
-        "status": 200,
-        "reason": "OK",
-        "http_version": "2",
-        "status_line": "HTTP/2 200 OK",
-        "headers": [["Content-Type", "text/html"]],
-        "body": "<!DOCTYPE html>...",
-        "body_encoding": "utf-8",
-        "body_length": 638888,
-        "body_truncated": true
-      }
-    }
-  ]
+  "repeater": {"tabs": [], "groups": []},
+  "coverage": {"proxy_items": 11, "site_map_messages": 95}
 }
 ```
 
-Headers are lists rather than objects so duplicate and ordered headers survive.
-`body_encoding` is `utf-8`, `latin-1`, or `base64`. When `body_truncated` is true,
-`body_length` still reports the original decoded length.
+Reading rules:
+
+- `schema` names every positional field. Read it once, then read rows as tuples.
+- `strings` is a global table. `item.tool`, `item.also[]`, `item.title`,
+  `item.comment`, and both halves of every header pair are indexes into it.
+  Other strings (URL, target, header values in the sidecar, summary strings) are
+  direct values.
+- Headers are flat `[nameIndex, valueIndex, ...]` pairs in wire order, so
+  duplicate and ordered headers survive.
+- Request rows are `[method, target, http_version, headers, body,
+  body_encoding, orig_bytes, ref]`.
+- Response rows are `[reason, http_version, headers, body, body_encoding,
+  orig_bytes, ref]`.
+- `body_encoding` is `null` for UTF-8, or `base64` / `latin-1` when needed.
+  `orig_bytes` is non-null when the body was truncated or moved to recall
+  (base64). `ref` names a body in the recall sidecar.
+- `time` is Unix milliseconds. `status` is the response status code. The URL
+  carries scheme, host, port, path, and query. Path, query parameters, cookies,
+  and body parameters are derivable from the target/headers/body, so they are not
+  repeated.
+- `also` lists other Burp tools that stored the same exchange.
+- Base64 bodies are not inlined by default because base64 prefixes tokenize
+  badly; they are available in the recall sidecar. `--full` inlines them.
+
+### Recall sidecar
+
+When compact output elides data (a body/header preview, a capped string, or a
+base64 body), the main file's `recall` field points at `<output>.recall.json`:
+
+```jsonc
+{
+  "format": "b2j-recall/1",
+  "read": "b2j-recall/1: full values omitted from the b2j-sir/1 file. ...",
+  "strings": {"s42": "full untruncated value"},
+  "bodies": {"1p": "full response body available to the converter"}
+}
+```
+
+- `strings` keys are `s<index>` for the matching `strings[]` entry.
+- `bodies` keys are `<itemId>r` / `<itemId>p` for requests/responses, and
+  `c<n>r` / `c<n>p` for Collaborator interaction `n`.
+- A recall body may already be shorter than `orig_bytes` if `--max-body` capped
+  it before compaction.
+- `--full` disables all compact preview caps and base64 elision, so no recall
+  sidecar is written. Body data already dropped by `--max-body` is not
+  recoverable.
+
+For chunked output, each `*_partNNN.json` gets its own
+`*_partNNN.recall.json` sidecar. The sidecar contains the same redactions as the
+main file; protect both. `summary.total` covers the full result set while
+`meta.items` is the number of rows in that part.
+
+### Legacy output
+
+`--legacy-json` emits the pre-2.1 verbose shape: `ai_instructions`, `meta`,
+`summary`, `collaborator`, `repeater`, `intruder`, `scanner`, `coverage`, and an
+`items` array of one object per exchange. It preserves `time_iso`, parsed
+cookies/params, derived paths, file offsets, and the full metadata map. Use it for
+scripts that depend on the old field names.
+
+## Token efficiency
+
+The development sample was a 16 MiB schema-217 project with 95 HTTP items. Counts
+below use `tiktoken` with `o200k_base` (`scripts/token_count.py`; install it with
+`python3 -m pip install tiktoken`):
+
+| Output | Tokens | Bytes |
+| --- | ---: | ---: |
+| Legacy verbose JSON | 2,485,776 | 5,074,543 |
+| `b2j-sir/1` with `--full` | 1,337,432 | 2,958,216 |
+| `b2j-sir/1` default | 96,144 | 210,824 |
+
+The default cuts the main file by about 25.9x by tokens (96.1% fewer) while
+retaining every item, header name, endpoint, and a 1 KiB body prefix. The recall
+sidecar is about 2.7 MiB on this sample, but an LLM only reads it if it needs a
+specific full body or header value.
+
+The format borrows the useful parts of RTK's TOON/minify-json/dedup/cap+recall
+ideas: schema once, deduplicate repeated structure, and make lossy previews
+retrievable instead of unreadable.
 
 ## How extraction works
 
@@ -264,8 +305,8 @@ for strings and guess. For a schema-217 project it reads:
 
 Exchanges are deduplicated by SHA-256 of the exact request and response bytes. When
 the same exchange exists in several tools, the item keeps the higher-priority source
-(`proxy` > `repeater` > `site-map` > `unknown`) and lists the others in
-`also_seen_in`.
+(`proxy` > `repeater` > `site-map` > `unknown`) and lists the others in `also`
+(compact output) or `also_seen_in` (legacy output).
 
 If the header or schema is not recognised, the structural parser is skipped and a
 byte-level HTTP carver is used. The carver also inspects zlib/gzip blobs, but it
@@ -345,7 +386,8 @@ material.
 - redacts Collaborator request/response messages too.
 
 It does **not** reliably redact secrets embedded in free-form response bodies, HTML,
-JavaScript, or unusual header names. Always review the output before sharing it.
+JavaScript, or unusual header names. Always review the output and any
+`.recall.json` sidecar before sharing them.
 
 ## Reverse-engineering notes
 
@@ -373,6 +415,7 @@ Key format facts worth preserving:
 
 ```text
 main.go       CLI, input reading, format detection, output and chunk writing
+compact.go    b2j-sir/1 compact output, string interning, recall sidecar
 progress.go   terminal progress bar
 model.go      shared JSON types
 httpmsg.go    HTTP parsing, body decoding, URL inference
@@ -382,6 +425,7 @@ xmlhar.go     Burp XML and HAR readers
 transform.go  deduplication, finalisation, redaction, summary
 *_test.go     Go test suite and synthetic heap fixture
 go.mod        module and Brotli dependency
+scripts/token_count.py  tiktoken benchmark helper
 README.md     this document
 .gitignore    ignores .burp files, generated JSON, and build artifacts
 ```

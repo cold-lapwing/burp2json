@@ -3,6 +3,7 @@
 *.burp.json
 *.har
 *_part[0-9][0-9][0-9].json
+*.recall.json
 
 # Local generated output
 /out/

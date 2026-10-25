@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -411,10 +412,42 @@ func TestRedaction(t *testing.T) {
 	}
 }
 
+func TestCompactRedactionSidecar(t *testing.T) {
+	path, _ := buildTestProject(t)
+	out := filepath.Join(t.TempDir(), "redacted.json")
+	if code := run([]string{
+		path, "-o", out, "--redact", "--body-preview", "2", "--header-max", "4",
+		"--no-progress",
+	}); code != 0 {
+		t.Fatalf("run returned %d", code)
+	}
+	mainData, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recallData, err := os.ReadFile(recallOutputPath(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, data := range [][]byte{mainData, recallData} {
+		if bytes.Contains(data, []byte("super-secret")) ||
+			bytes.Contains(data, []byte("top-secret-token")) {
+			t.Fatalf("secret survived redaction: %s", data)
+		}
+	}
+	var recall compactRecall
+	if err := json.Unmarshal(recallData, &recall); err != nil {
+		t.Fatal(err)
+	}
+	if len(recall.Bodies) == 0 {
+		t.Fatal("expected redacted bodies in the recall sidecar")
+	}
+}
+
 func TestHostFilterAndChunking(t *testing.T) {
 	path, _ := buildTestProject(t)
 	out := filepath.Join(t.TempDir(), "all.json")
-	if code := run([]string{path, "-o", out, "--host", "example", "--max-body", "10"}); code != 0 {
+	if code := run([]string{path, "-o", out, "--host", "example", "--max-body", "10", "--legacy-json"}); code != 0 {
 		t.Fatalf("run returned %d", code)
 	}
 	data, err := os.ReadFile(out)
@@ -442,7 +475,7 @@ func TestHostFilterAndChunking(t *testing.T) {
 	}
 
 	chunkBase := filepath.Join(t.TempDir(), "chunked.json")
-	if code := run([]string{path, "-o", chunkBase, "--chunk-items", "2", "--no-summary"}); code != 0 {
+	if code := run([]string{path, "-o", chunkBase, "--chunk-items", "2", "--no-summary", "--legacy-json"}); code != 0 {
 		t.Fatalf("chunk run returned %d", code)
 	}
 	part1 := filepath.Join(filepath.Dir(chunkBase), "chunked_part001.json")
@@ -457,8 +490,218 @@ func TestHostFilterAndChunking(t *testing.T) {
 	if err := json.Unmarshal(partData, &part); err != nil {
 		t.Fatal(err)
 	}
-	if part.Summary != nil || len(part.Items) != 2 {
-		t.Fatalf("part summary/items = %v %d", part.Summary, len(part.Items))
+	if part.Summary != nil || len(part.Items) != 2 || part.Meta.ItemCount != 2 {
+		t.Fatalf("part summary/items/meta = %v %d %d", part.Summary, len(part.Items), part.Meta.ItemCount)
+	}
+}
+
+func TestCompactOutputAndRecall(t *testing.T) {
+	path, _ := buildTestProject(t)
+	out := filepath.Join(t.TempDir(), "compact.json")
+	if code := run([]string{
+		path, "-o", out, "--body-preview", "2", "--header-max", "4", "--no-progress",
+	}); code != 0 {
+		t.Fatalf("run returned %d", code)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compact CompactDocument
+	if err := json.Unmarshal(data, &compact); err != nil {
+		t.Fatal(err)
+	}
+	if compact.Format != compactFormat || len(compact.Items) != 3 {
+		t.Fatalf("format/items = %q %d", compact.Format, len(compact.Items))
+	}
+	if compact.Recall != "compact.recall.json" {
+		t.Fatalf("recall = %q", compact.Recall)
+	}
+	if compact.Summary == nil || compact.Summary.Total != 3 {
+		t.Fatalf("summary = %+v", compact.Summary)
+	}
+	if len(compact.Strings) == 0 || !strings.Contains(strings.Join(compact.Strings, "\n"), "…[") {
+		t.Fatalf("expected a capped string, got %v", compact.Strings)
+	}
+
+	var proxy []any
+	for _, item := range compact.Items {
+		toolIndex := int(item[1].(float64))
+		if compact.Strings[toolIndex] == "proxy" {
+			proxy = item
+			break
+		}
+	}
+	if proxy == nil {
+		t.Fatal("proxy item missing")
+	}
+	response := proxy[10].([]any)
+	body := response[3].(string)
+	if len(body) > 2 || !strings.Contains(body, "{") {
+		t.Fatalf("body preview = %q", body)
+	}
+	if response[6] != "1p" {
+		t.Fatalf("body ref = %v", response[6])
+	}
+
+	sidecar, err := os.ReadFile(recallOutputPath(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recall compactRecall
+	if err := json.Unmarshal(sidecar, &recall); err != nil {
+		t.Fatal(err)
+	}
+	if recall.Bodies["1p"] != `{"ok":true,"n":1}` {
+		t.Fatalf("recall body = %q", recall.Bodies["1p"])
+	}
+	foundSecret := false
+	for _, value := range recall.Strings {
+		if value == "sid=super-secret" {
+			foundSecret = true
+		}
+	}
+	if !foundSecret {
+		t.Fatalf("full header value missing from recall: %v", recall.Strings)
+	}
+}
+
+func TestCompactFullDisablesRecall(t *testing.T) {
+	path, _ := buildTestProject(t)
+	out := filepath.Join(t.TempDir(), "full.json")
+	if code := run([]string{
+		path, "-o", out, "--body-preview", "2", "--header-max", "4", "--no-progress",
+	}); code != 0 {
+		t.Fatalf("preview run returned %d", code)
+	}
+	if _, err := os.Stat(recallOutputPath(out)); err != nil {
+		t.Fatalf("expected a recall sidecar before --full: %v", err)
+	}
+	if code := run([]string{
+		path, "-o", out, "--body-preview", "2", "--header-max", "4", "--full", "--no-progress",
+	}); code != 0 {
+		t.Fatalf("run returned %d", code)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compact CompactDocument
+	if err := json.Unmarshal(data, &compact); err != nil {
+		t.Fatal(err)
+	}
+	if compact.Recall != "" {
+		t.Fatalf("recall = %q", compact.Recall)
+	}
+	if _, err := os.Stat(recallOutputPath(out)); !os.IsNotExist(err) {
+		t.Fatalf("recall sidecar should not exist: %v", err)
+	}
+	proxyBody := ""
+	for _, item := range compact.Items {
+		toolIndex := int(item[1].(float64))
+		if compact.Strings[toolIndex] != "proxy" {
+			continue
+		}
+		proxyBody = item[10].([]any)[3].(string)
+	}
+	if proxyBody != `{"ok":true,"n":1}` {
+		t.Fatalf("full body = %q", proxyBody)
+	}
+}
+
+func TestCompactDefault(t *testing.T) {
+	path, _ := buildTestProject(t)
+	out := filepath.Join(t.TempDir(), "default.json")
+	if code := run([]string{path, "-o", out, "--no-progress"}); code != 0 {
+		t.Fatalf("run returned %d", code)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compact CompactDocument
+	if err := json.Unmarshal(data, &compact); err != nil {
+		t.Fatal(err)
+	}
+	if compact.Format != compactFormat || len(compact.Items) != 3 || compact.Recall != "" {
+		t.Fatalf("format/items/recall = %q %d %q", compact.Format, len(compact.Items), compact.Recall)
+	}
+	if compact.Summary == nil || compact.Summary.Total != 3 {
+		t.Fatalf("summary = %+v", compact.Summary)
+	}
+}
+
+func TestCompactChunking(t *testing.T) {
+	path, _ := buildTestProject(t)
+	out := filepath.Join(t.TempDir(), "chunked.json")
+	if code := run([]string{
+		path, "-o", out, "--chunk-items", "2", "--body-preview", "2", "--header-max", "4",
+		"--no-progress",
+	}); code != 0 {
+		t.Fatalf("run returned %d", code)
+	}
+	base := strings.TrimSuffix(out, ".json")
+	for index, expected := range []int{2, 1} {
+		partPath := fmt.Sprintf("%s_part%03d.json", base, index+1)
+		data, err := os.ReadFile(partPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var part CompactDocument
+		if err := json.Unmarshal(data, &part); err != nil {
+			t.Fatal(err)
+		}
+		if len(part.Items) != expected || part.Meta.Items != expected ||
+			part.Meta.Part != index+1 || part.Meta.Parts != 2 {
+			t.Fatalf("part %d meta/items = %+v/%d", index+1, part.Meta, len(part.Items))
+		}
+		if (part.Summary != nil) != (index == 0) {
+			t.Fatalf("part %d summary = %+v", index+1, part.Summary)
+		}
+		if part.Recall == "" {
+			t.Fatalf("part %d has no recall reference", index+1)
+		}
+		if _, err := os.Stat(recallOutputPath(partPath)); err != nil {
+			t.Fatalf("part %d recall sidecar: %v", index+1, err)
+		}
+	}
+}
+
+func TestCompactBase64UsesRecall(t *testing.T) {
+	document := &Document{
+		Meta:         Meta{Tool: "burp2json", ItemCount: 1},
+		Collaborator: emptyCollaborator(""),
+		Repeater:     emptyRepeater(),
+		Coverage:     map[string]any{},
+		Items: []Item{{
+			ID: 1, SourceTool: "proxy", Status: intPtr(200),
+			Response: &ResponseMessage{
+				Status: 200,
+				BodyFields: BodyFields{
+					Body: "AQID", BodyEncoding: "base64", BodyLength: 3,
+				},
+			},
+		}},
+	}
+	compact, recall := buildCompactDocument(document, compactOptions{
+		BodyPreview: 1024, HeaderMax: 512, RecallName: "base.recall.json",
+	})
+	if recall == nil || recall.Bodies["1p"] != "AQID" {
+		t.Fatalf("recall = %#v", recall)
+	}
+	response := compact.Items[0][10].([]any)
+	if response[3] != "" || response[4] != "base64" || response[5] != 3 || response[6] != "1p" {
+		t.Fatalf("response = %#v", response)
+	}
+
+	full, fullRecall := buildCompactDocument(document, compactOptions{
+		BodyPreview: 1024, HeaderMax: 512, KeepBase64: true,
+	})
+	if fullRecall != nil {
+		t.Fatalf("unexpected recall: %#v", fullRecall)
+	}
+	if body := full.Items[0][10].([]any)[3]; body != "AQID" {
+		t.Fatalf("full base64 body = %q", body)
 	}
 }
 

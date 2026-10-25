@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const version = "2.0.0"
+const version = "2.1.0"
 
 const aiInstructions = "This JSON was produced from a Burp Suite project by burp2json. 'summary' gives the " +
 	"application overview (hosts, endpoints, parameters, cookies, status codes, tech). " +
@@ -28,20 +28,24 @@ const aiInstructions = "This JSON was produced from a Burp Suite project by burp
 	"Values marked [REDACTED] were removed by the user before sharing."
 
 type cliOptions struct {
-	input      string
-	output     string
-	format     string
-	maxBody    int
-	hosts      []string
-	redact     bool
-	chunkItems int
-	noSummary  bool
-	noProgress bool
-	help       bool
+	input       string
+	output      string
+	format      string
+	maxBody     int
+	hosts       []string
+	redact      bool
+	chunkItems  int
+	noSummary   bool
+	noProgress  bool
+	legacyJSON  bool
+	full        bool
+	bodyPreview int
+	headerMax   int
+	help        bool
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `burp2json - convert Burp Suite data to AI-friendly JSON
+	fmt.Fprint(w, `burp2json - convert Burp Suite data to token-efficient JSON for LLMs
 
 Usage:
   burp2json [options] INPUT
@@ -51,21 +55,38 @@ Input formats are auto-detected, or force one with --format:
   xml    Burp "Save items" XML export
   har    HAR file
 
+The default output is b2j-sir/1: a schema-once, positional-row JSON format with
+a global string table, flat header pairs, and a recall sidecar for values that
+were elided. Use --legacy-json for the old verbose shape.
+
 Options:
-  -o, --output PATH     output .json (default: <input>.json)
-      --format FORMAT   burp, xml, or har
-      --max-body BYTES  max bytes of each body to keep (default: 200000)
-      --host TEXT       keep only items whose host contains TEXT (repeatable)
-      --redact          redact auth headers, cookies, JWTs, secret-looking fields
-      --chunk-items N   split into files of N items each
-      --no-summary      omit the summary object
-      --no-progress     disable the progress bar
-  -h, --help            show this help
+  -o, --output PATH       output .json (default: <input>.json)
+      --format FORMAT     burp, xml, or har
+      --max-body BYTES    max bytes of each body to keep (default: 200000)
+      --body-preview BYTES
+                          bytes of each body kept inline (default: 1024;
+                          0 = full text; base64 still needs --full)
+      --header-max BYTES  max bytes per interned header value/comment/title
+                          (default: 512; 0 = full)
+      --full              disable compact caps and base64 elision
+      --legacy-json       write the old verbose JSON document instead
+      --host TEXT         keep only items whose host contains TEXT (repeatable)
+      --redact            redact auth headers, cookies, JWTs, secret-looking fields
+      --chunk-items N     split into files of N items each
+      --no-summary        omit the summary object
+      --no-progress       disable the progress bar
+  -h, --help              show this help
+
+When compact mode elides a value (body/header preview or base64 body), burp2json
+writes a <output>.recall.json sidecar with the full values. The main file still
+contains every item, endpoint, header name, and a body prefix.
 
 Examples:
   burp2json project.burp
   burp2json --redact --chunk-items 50 project.burp -o review.json
   burp2json --host example.com proxy-export.xml
+  burp2json --full project.burp -o full-compact.json
+  burp2json --legacy-json project.burp -o old-shape.json
 
 The input file is opened read-only and is never modified.
 Progress is shown on stderr for files of 1 MiB or more on interactive terminals.
@@ -75,7 +96,11 @@ Use only on data from targets you are authorised to test.
 }
 
 func parseArgs(argv []string) (cliOptions, error) {
-	options := cliOptions{maxBody: 200_000}
+	options := cliOptions{
+		maxBody:     200_000,
+		bodyPreview: defaultBodyPreview,
+		headerMax:   defaultHeaderMax,
+	}
 	haveInput := false
 	for index := 0; index < len(argv); index++ {
 		arg := argv[index]
@@ -144,6 +169,30 @@ func parseArgs(argv []string) (cliOptions, error) {
 				return options, fmt.Errorf("--max-body must be an integer")
 			}
 			options.maxBody = number
+		case "--body-preview":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			number, err := strconv.Atoi(parsed)
+			if err != nil {
+				return options, fmt.Errorf("--body-preview must be an integer")
+			}
+			options.bodyPreview = number
+		case "--header-max":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			number, err := strconv.Atoi(parsed)
+			if err != nil {
+				return options, fmt.Errorf("--header-max must be an integer")
+			}
+			options.headerMax = number
+		case "--full":
+			options.full = true
+		case "--legacy-json":
+			options.legacyJSON = true
 		case "--host":
 			parsed, err := takeValue()
 			if err != nil {
@@ -179,8 +228,18 @@ func parseArgs(argv []string) (cliOptions, error) {
 	if options.maxBody < 0 {
 		return options, fmt.Errorf("--max-body must be >= 0")
 	}
+	if options.bodyPreview < 0 {
+		return options, fmt.Errorf("--body-preview must be >= 0")
+	}
+	if options.headerMax < 0 {
+		return options, fmt.Errorf("--header-max must be >= 0")
+	}
 	if options.chunkItems < 0 {
 		return options, fmt.Errorf("--chunk-items must be >= 0")
+	}
+	if options.full {
+		options.bodyPreview = 0
+		options.headerMax = 0
 	}
 	return options, nil
 }
@@ -250,7 +309,7 @@ func detectFormatData(path string, data []byte) string {
 	return "burp"
 }
 
-func writeJSON(path string, document *Document, progress *progressBar, start, end float64) error {
+func writeJSON(path string, value any, pretty bool, progress *progressBar, start, end float64) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
@@ -258,8 +317,10 @@ func writeJSON(path string, document *Document, progress *progressBar, start, en
 	progress.Update("Writing output", start)
 	encoder := json.NewEncoder(file)
 	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	encodeErr := encoder.Encode(document)
+	if pretty {
+		encoder.SetIndent("", "  ")
+	}
+	encodeErr := encoder.Encode(value)
 	closeErr := file.Close()
 	if encodeErr != nil {
 		return encodeErr
@@ -268,6 +329,38 @@ func writeJSON(path string, document *Document, progress *progressBar, start, en
 		progress.Update("Writing output", end)
 	}
 	return closeErr
+}
+
+func removeRecallSidecar(path string) {
+	_ = os.Remove(recallOutputPath(path))
+}
+
+func writeOutput(path string, document *Document, options cliOptions, progress *progressBar, start, end float64) error {
+	if options.legacyJSON {
+		removeRecallSidecar(path)
+		return writeJSON(path, document, true, progress, start, end)
+	}
+	progress.Update("Compacting output", start)
+	recallName := filepath.Base(recallOutputPath(path))
+	compact, recall := buildCompactDocument(document, compactOptions{
+		BodyPreview: options.bodyPreview,
+		HeaderMax:   options.headerMax,
+		KeepBase64:  options.full,
+		RecallName:  recallName,
+	})
+	if recall == nil {
+		removeRecallSidecar(path)
+		return writeJSON(path, compact, false, progress, start, end)
+	}
+	split := start + (end-start)*0.8
+	if err := writeJSON(path, compact, false, progress, start, split); err != nil {
+		return err
+	}
+	recallPath := recallOutputPath(path)
+	if err := writeJSON(recallPath, recall, false, progress, split, end); err != nil {
+		return err
+	}
+	return nil
 }
 
 func sourceToolCounts(items []Item) map[string]int {
@@ -462,6 +555,8 @@ func run(argv []string) int {
 			partMeta := meta
 			partMeta.Part = partNumber
 			partMeta.Parts = parts
+			partMeta.ItemCount = end - start
+			partMeta.SourceToolCounts = sourceToolCounts(items[start:end])
 			partDocument := &Document{
 				AIInstructions: aiInstructions,
 				Meta:           partMeta,
@@ -485,14 +580,14 @@ func run(argv []string) int {
 			path := fmt.Sprintf("%s_part%03d%s", base, partNumber, extension)
 			partStart := 94 + 6*float64(partIndex)/float64(parts)
 			partEnd := 94 + 6*float64(partNumber)/float64(parts)
-			if err := writeJSON(path, partDocument, progress, partStart, partEnd); err != nil {
+			if err := writeOutput(path, partDocument, options, progress, partStart, partEnd); err != nil {
 				fmt.Fprintf(os.Stderr, "error writing %s: %s\n", path, err)
 				return 1
 			}
 			written = append(written, path)
 		}
 	} else {
-		if err := writeJSON(outPath, document, progress, 94, 100); err != nil {
+		if err := writeOutput(outPath, document, options, progress, 94, 100); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing %s: %s\n", outPath, err)
 			return 1
 		}
