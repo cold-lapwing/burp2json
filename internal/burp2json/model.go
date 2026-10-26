@@ -1,45 +1,45 @@
 package burp2json
 
-// Shared data model. JSON field names are kept stable for existing consumers.
+// Shared data model used by the parsers and the compact output builder.
 
 type Header = [2]string
 
 type BodyFields struct {
-	Headers       [][2]string `json:"headers"`
-	ContentType   string      `json:"content_type,omitempty"`
-	Body          string      `json:"body"`
-	BodyEncoding  string      `json:"body_encoding"`
-	BodyLength    int         `json:"body_length"`
-	BodyTruncated bool        `json:"body_truncated"`
+	Headers       [][2]string
+	ContentType   string
+	Body          string
+	BodyEncoding  string
+	BodyLength    int
+	BodyTruncated bool
 }
 
 type RequestMessage struct {
-	Method      string `json:"method"`
-	Target      string `json:"target"`
-	HTTPVersion string `json:"http_version,omitempty"`
-	RequestLine string `json:"request_line"`
+	Method      string
+	Target      string
+	HTTPVersion string
+	RequestLine string
 	BodyFields
-	Path        string            `json:"path"`
-	QueryParams [][2]any          `json:"query_params"`
-	Cookies     map[string]string `json:"cookies"`
-	BodyParams  [][2]any          `json:"body_params"`
-	HostHeader  string            `json:"host_header,omitempty"`
+	Path        string
+	QueryParams [][2]any
+	Cookies     map[string]string
+	BodyParams  [][2]any
+	HostHeader  string
 }
 
 type ResponseMessage struct {
-	Status      int    `json:"status"`
-	Reason      string `json:"reason,omitempty"`
-	HTTPVersion string `json:"http_version,omitempty"`
-	StatusLine  string `json:"status_line"`
+	Status      int
+	Reason      string
+	HTTPVersion string
+	StatusLine  string
 	BodyFields
 }
 
 type Service struct {
-	Host                   string `json:"host"`
-	Port                   *int   `json:"port"`
-	TLS                    *bool  `json:"tls"`
-	RequestMetadataAddress int64  `json:"request_metadata_address"`
-	ServiceAddress         int64  `json:"service_address"`
+	Host                   string
+	Port                   *int
+	TLS                    *bool
+	RequestMetadataAddress int64
+	ServiceAddress         int64
 }
 
 type Exchange struct {
@@ -65,26 +65,26 @@ type Exchange struct {
 }
 
 type Item struct {
-	ID                 int              `json:"id"`
-	SourceTool         string           `json:"source_tool"`
-	AlsoSeenIn         []string         `json:"also_seen_in"`
-	Time               *int64           `json:"time"`
-	TimeISO            *string          `json:"time_iso"`
-	URL                *string          `json:"url"`
-	Host               *string          `json:"host"`
-	Port               *int             `json:"port"`
-	Protocol           *string          `json:"protocol"`
-	Method             *string          `json:"method"`
-	Path               *string          `json:"path"`
-	Status             *int             `json:"status"`
-	Comment            *string          `json:"comment"`
-	Highlight          *string          `json:"highlight"`
-	Metadata           map[string]any   `json:"metadata"`
-	Request            *RequestMessage  `json:"request"`
-	Response           *ResponseMessage `json:"response"`
-	RequestFileOffset  *int64           `json:"request_file_offset,omitempty"`
-	ResponseFileOffset *int64           `json:"response_file_offset,omitempty"`
-	Warnings           []string         `json:"warnings,omitempty"`
+	ID                 int
+	SourceTool         string
+	AlsoSeenIn         []string
+	Time               *int64
+	TimeISO            *string
+	URL                *string
+	Host               *string
+	Port               *int
+	Protocol           *string
+	Method             *string
+	Path               *string
+	Status             *int
+	Comment            *string
+	Highlight          *string
+	Metadata           map[string]any
+	Request            *RequestMessage
+	Response           *ResponseMessage
+	RequestFileOffset  *int64
+	ResponseFileOffset *int64
+	Warnings           []string
 }
 
 type Group struct {
@@ -110,115 +110,114 @@ type RepeaterInfo struct {
 }
 
 type Interaction struct {
-	Type            string           `json:"type"`
-	Host            string           `json:"host"`
-	Method          string           `json:"method"`
-	Path            string           `json:"path"`
-	RequestLine     string           `json:"request_line"`
-	ResponseStatus  *int             `json:"response_status"`
-	ResponseServer  *string          `json:"response_server"`
-	RequestAddress  int64            `json:"request_address"`
-	ResponseAddress *int64           `json:"response_address"`
-	Request         *RequestMessage  `json:"request"`
-	Response        *ResponseMessage `json:"response"`
+	Type            string
+	Host            string
+	Method          string
+	Path            string
+	RequestLine     string
+	ResponseStatus  *int
+	ResponseServer  *string
+	RequestAddress  int64
+	ResponseAddress *int64
+	Request         *RequestMessage
+	Response        *ResponseMessage
 }
 
 type Collaborator struct {
-	DomainsSeen          []string      `json:"domains_seen"`
-	InteractionTypesSeen []string      `json:"interaction_types_seen"`
-	Interactions         []Interaction `json:"interactions"`
-	Note                 string        `json:"note"`
+	DomainsSeen          []string
+	InteractionTypesSeen []string
+	Interactions         []Interaction
+	Note                 string
 }
 
 type BurpInfo struct {
-	Magic           string  `json:"magic"`
-	OuterVersion    int     `json:"outer_version"`
-	Compatibility   string  `json:"compatibility"`
-	SchemaFloor     int     `json:"schema_floor"`
-	SchemaCurrent   int     `json:"schema_current"`
-	ProjectName     *string `json:"project_name"`
-	BurpVersion     *string `json:"burp_version"`
-	BurpVersionNote string  `json:"burp_version_note"`
+	Magic           string
+	OuterVersion    int
+	Compatibility   string
+	SchemaFloor     int
+	SchemaCurrent   int
+	ProjectName     *string
+	BurpVersion     *string
+	BurpVersionNote string
 }
 
 type Meta struct {
-	Tool             string         `json:"tool"`
-	ToolVersion      string         `json:"tool_version"`
-	SourceFile       string         `json:"source_file"`
-	SourceSHA256     string         `json:"source_sha256"`
-	SourceSize       int64          `json:"source_size"`
-	InputFormat      string         `json:"input_format"`
-	ExtractionMethod string         `json:"extraction_method"`
-	GeneratedAt      string         `json:"generated_at"`
-	ReadOnly         bool           `json:"read_only"`
-	ItemCount        int            `json:"item_count"`
-	SourceToolCounts map[string]int `json:"source_tool_counts"`
-	Redacted         bool           `json:"redacted"`
-	Burp             *BurpInfo      `json:"burp"`
-	Warnings         []string       `json:"warnings"`
-	Part             int            `json:"part,omitempty"`
-	Parts            int            `json:"parts,omitempty"`
+	Tool             string
+	ToolVersion      string
+	SourceFile       string
+	SourceSHA256     string
+	SourceSize       int64
+	InputFormat      string
+	ExtractionMethod string
+	GeneratedAt      string
+	ReadOnly         bool
+	ItemCount        int
+	SourceToolCounts map[string]int
+	Redacted         bool
+	Burp             *BurpInfo
+	Warnings         []string
+	Part             int
+	Parts            int
 }
 
 type HostDetail struct {
-	Host      string   `json:"host"`
-	Count     int      `json:"count"`
-	Ports     []int    `json:"ports"`
-	Protocols []string `json:"protocols"`
+	Host      string
+	Count     int
+	Ports     []int
+	Protocols []string
 }
 
 type Endpoint struct {
-	Host     string         `json:"host"`
-	Method   string         `json:"method"`
-	Path     string         `json:"path"`
-	Count    int            `json:"count"`
-	Statuses map[string]int `json:"statuses"`
-	Params   []string       `json:"params"`
+	Host     string
+	Method   string
+	Path     string
+	Count    int
+	Statuses map[string]int
+	Params   []string
 }
 
 type RedirectInfo struct {
-	ID       int     `json:"id"`
-	URL      *string `json:"url"`
-	Status   *int    `json:"status"`
-	Location *string `json:"location"`
+	ID       int
+	URL      *string
+	Status   *int
+	Location *string
 }
 
 type ErrorInfo struct {
-	ID     int     `json:"id"`
-	URL    *string `json:"url"`
-	Status *int    `json:"status"`
+	ID     int
+	URL    *string
+	Status *int
 }
 
 type Summary struct {
-	TotalItems                      int            `json:"total_items"`
-	SourceToolCounts                map[string]int `json:"source_tool_counts"`
-	Hosts                           map[string]int `json:"hosts"`
-	HostDetails                     []HostDetail   `json:"host_details"`
-	Endpoints                       []Endpoint     `json:"endpoints"`
-	ParameterNames                  []string       `json:"parameter_names"`
-	Methods                         map[string]int `json:"methods"`
-	StatusCodes                     map[string]int `json:"status_codes"`
-	ContentTypes                    map[string]int `json:"content_types"`
-	TechnologyHeaders               map[string]int `json:"technology_headers"`
-	CookieNamesSeen                 []string       `json:"cookie_names_seen"`
-	AuthHeaderNamesSeen             []string       `json:"auth_header_names_seen"`
-	ResponsesMissingSecurityHeaders map[string]int `json:"responses_missing_security_headers"`
-	Redirects                       []RedirectInfo `json:"redirects"`
-	ClientErrors                    []ErrorInfo    `json:"client_errors"`
-	ServerErrors                    []ErrorInfo    `json:"server_errors"`
-	Highlights                      map[string]int `json:"highlights"`
+	TotalItems                      int
+	SourceToolCounts                map[string]int
+	Hosts                           map[string]int
+	HostDetails                     []HostDetail
+	Endpoints                       []Endpoint
+	ParameterNames                  []string
+	Methods                         map[string]int
+	StatusCodes                     map[string]int
+	ContentTypes                    map[string]int
+	TechnologyHeaders               map[string]int
+	CookieNamesSeen                 []string
+	AuthHeaderNamesSeen             []string
+	ResponsesMissingSecurityHeaders map[string]int
+	Redirects                       []RedirectInfo
+	ClientErrors                    []ErrorInfo
+	ServerErrors                    []ErrorInfo
+	Highlights                      map[string]int
 }
 
-type Document struct {
-	AIInstructions string         `json:"ai_instructions"`
-	Meta           Meta           `json:"meta"`
-	Summary        *Summary       `json:"summary,omitempty"`
-	Collaborator   Collaborator   `json:"collaborator"`
-	Repeater       RepeaterInfo   `json:"repeater"`
-	Intruder       map[string]any `json:"intruder"`
-	Scanner        map[string]any `json:"scanner"`
-	Coverage       map[string]any `json:"coverage"`
-	Items          []Item         `json:"items"`
+// Result is the internal aggregate consumed by the compact output builder.
+// It is never serialized directly; the output schema lives in compact.go.
+type Result struct {
+	Meta         Meta
+	Summary      *Summary
+	Collaborator Collaborator
+	Repeater     RepeaterInfo
+	Coverage     map[string]any
+	Items        []Item
 }
 
 type ExtractionResult struct {

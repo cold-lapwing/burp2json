@@ -12,14 +12,14 @@ import (
 // It uses a schema-once, positional-row layout, a global string table, and flat
 // header index pairs. Repeating a key on every item/header is expensive in tokens.
 const (
-	compactFormat = "b2j-sir/1"
+	compactFormat = "b2j/1"
 	recallFormat  = "b2j-recall/1"
 
 	defaultBodyPreview = 1024
 	defaultHeaderMax   = 512
 )
 
-const compactRead = "b2j-sir/1: schema-once JSON for LLMs. " +
+const compactRead = "b2j/1: schema-once JSON for LLMs. " +
 	"'schema' maps every positional array to its fields. " +
 	"'strings' is a global table. Indexes: item.tool, item.also[], item.title, item.comment, and flat header pairs. " +
 	"Other strings are direct values. Headers are [nameIndex,valueIndex,...] in wire order (duplicates preserved). " +
@@ -37,7 +37,7 @@ const compactRead = "b2j-sir/1: schema-once JSON for LLMs. " +
 	"Review for access control, IDOR, auth/session handling, injection points, CORS, security headers, " +
 	"information disclosure, and business-logic flaws. Intruder/Scanner configuration is not recovered."
 
-const recallRead = "b2j-recall/1: full values omitted from the b2j-sir/1 file. " +
+const recallRead = "b2j-recall/1: full values omitted from the b2j/1 file. " +
 	"'strings' maps s<index> to the untruncated value for that strings[] index. " +
 	"'bodies' maps <itemId>r/<itemId>p to the full request/response body available to the converter, " +
 	"and c<n>r/c<n>p for Collaborator interaction n. " +
@@ -497,28 +497,28 @@ func compactSchemaDefinition() CompactSchema {
 	}
 }
 
-func buildCompactDocument(document *Document, options compactOptions) (*CompactDocument, *compactRecall) {
+func buildCompactDocument(result *Result, options compactOptions) (*CompactDocument, *compactRecall) {
 	builder := newCompactBuilder(options)
-	items := make([][]any, 0, len(document.Items))
-	for _, item := range document.Items {
+	items := make([][]any, 0, len(result.Items))
+	for _, item := range result.Items {
 		items = append(items, builder.item(item))
 	}
-	coverage := document.Coverage
+	coverage := result.Coverage
 	if coverage == nil {
 		coverage = map[string]any{}
 	}
-	summary := compactSummary(document.Summary)
-	collaborator := compactCollaborator(&document.Collaborator, builder)
+	summary := compactSummary(result.Summary)
+	collaborator := compactCollaborator(&result.Collaborator, builder)
 	out := &CompactDocument{
 		Format:       compactFormat,
 		Read:         compactRead,
-		Meta:         compactMeta(document.Meta),
+		Meta:         compactMeta(result.Meta),
 		Schema:       compactSchemaDefinition(),
 		Strings:      builder.strings,
 		Items:        items,
 		Summary:      summary,
 		Collaborator: collaborator,
-		Repeater:     document.Repeater,
+		Repeater:     result.Repeater,
 		Coverage:     coverage,
 	}
 	if len(builder.recall.Strings) > 0 || len(builder.recall.Bodies) > 0 {

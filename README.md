@@ -8,11 +8,10 @@ comments, highlights, timestamps, Site Map entries, Repeater tabs, and Collabora
 HTTP interactions. It is read-only and uses the Go standard library plus a small
 Brotli decoder for `Content-Encoding: br`.
 
-The default output is `b2j-sir/1`, a schema-once positional format designed for
-LLM context windows. Header names and repeated values are interned, derivable
-fields are removed, and large bodies/values are previewed with a recall sidecar so
-the full data stays out of the main file. `--legacy-json` still emits the old
-verbose shape.
+The output is `b2j/1`, a schema-once positional format designed for LLM context
+windows. Header names and repeated values are interned, derivable fields are
+removed, and large bodies/values are previewed with a recall sidecar so the full
+data stays out of the main file.
 
 > Only use this on targets you are authorised to test. The output can contain
 > credentials, session tokens, personal data, and full response bodies. Review it
@@ -30,14 +29,12 @@ verbose shape.
   token overhead.
 - Writes a `<output>.recall.json` sidecar for body/header previews so the main
   file stays small without losing the previewed values (subject to `--max-body`).
-- Keeps the previous verbose JSON available through `--legacy-json`.
 - Recovers Proxy history, Repeater tabs, Target Site Map entries, and Collaborator
   HTTP interactions where the project stores them.
 - Supports comments, highlight colours, capture timestamps, and response titles
-  where available. Legacy output also keeps listener ports, Burp MIME types, IPs,
-  and the full metadata map.
-- Deduplicates the same exchange across tools and records `also` in compact output
-  (`also_seen_in` in legacy output).
+  where available.
+- Deduplicates the same exchange across tools and records the other tools in each
+  item's `also` list.
 - Builds an application summary (hosts, endpoints, parameters, cookies, statuses,
   technologies, missing security headers, redirects, errors).
 - Can split output into numbered parts for context-window limits.
@@ -70,9 +67,6 @@ burp2json engagement.burp -o engagement.json
 
 # Disable preview caps and inline base64 bodies (still subject to --max-body)
 burp2json engagement.burp -o engagement.full.json --full
-
-# Old verbose JSON shape
-burp2json engagement.burp -o engagement.legacy.json --legacy-json
 
 # Redact common secrets before sharing
 burp2json engagement.burp -o engagement.redacted.json --redact
@@ -108,7 +102,6 @@ automatically when stderr is redirected, and can be forced off with
 | `--body-preview BYTES` | Bytes of each body kept inline in the compact file. Default: `1024`; `0` keeps full text bodies (base64 still needs `--full`). |
 | `--header-max BYTES` | Maximum bytes per interned header value/comment/title. Default: `512`; `0` keeps full values. |
 | `--full` | Disable compact preview caps and inline base64 bodies (still subject to `--max-body`). |
-| `--legacy-json` | Emit the old verbose JSON document instead of `b2j-sir/1`. |
 | `--host TEXT` | Keep only items whose host contains `TEXT`. Repeatable. |
 | `--redact` | Redact sensitive headers, cookies, JWTs, and secret-looking fields. |
 | `--chunk-items N` | Write `*_part001.json`, `*_part002.json`, ... with `N` items each. |
@@ -117,18 +110,18 @@ automatically when stderr is redirected, and can be forced off with
 
 ## Output shape
 
-The default file is `b2j-sir/1`: JSON with a schema, a global string table, and
+The output file is `b2j/1`: JSON with a schema, a global string table, and
 positional rows. It is intentionally optimized for an LLM reader, not for human
 diffing.
 
 ```jsonc
 {
-  "format": "b2j-sir/1",
-  "read": "b2j-sir/1: schema-once JSON for LLMs. ...",
+  "format": "b2j/1",
+  "read": "b2j/1: schema-once JSON for LLMs. ...",
   "recall": "engagement.recall.json",
   "meta": {
     "tool": "burp2json",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "source": "engagement.burp",
     "sha256": "...",
     "bytes": 16777216,
@@ -227,7 +220,7 @@ base64 body), the main file's `recall` field points at `<output>.recall.json`:
 ```jsonc
 {
   "format": "b2j-recall/1",
-  "read": "b2j-recall/1: full values omitted from the b2j-sir/1 file. ...",
+  "read": "b2j-recall/1: full values omitted from the b2j/1 file. ...",
   "strings": {"s42": "full untruncated value"},
   "bodies": {"1p": "full response body available to the converter"}
 }
@@ -247,14 +240,6 @@ For chunked output, each `*_partNNN.json` gets its own
 main file; protect both. `summary.total` covers the full result set while
 `meta.items` is the number of rows in that part.
 
-### Legacy output
-
-`--legacy-json` emits the pre-2.1 verbose shape: `ai_instructions`, `meta`,
-`summary`, `collaborator`, `repeater`, `intruder`, `scanner`, `coverage`, and an
-`items` array of one object per exchange. It preserves `time_iso`, parsed
-cookies/params, derived paths, file offsets, and the full metadata map. Use it for
-scripts that depend on the old field names.
-
 ## Token efficiency
 
 The development sample was a 16 MiB schema-217 project with 95 HTTP items. Counts
@@ -263,14 +248,14 @@ below use `tiktoken` with `o200k_base` (`scripts/token_count.py`; install it wit
 
 | Output | Tokens | Bytes |
 | --- | ---: | ---: |
-| Legacy verbose JSON | 2,485,776 | 5,074,543 |
-| `b2j-sir/1` with `--full` | 1,337,432 | 2,958,216 |
-| `b2j-sir/1` default | 96,144 | 210,824 |
+| `b2j/1` with `--full` | 1,337,419 | 2,958,197 |
+| `b2j/1` default | 96,130 | 210,799 |
 
-The default cuts the main file by about 25.9x by tokens (96.1% fewer) while
-retaining every item, header name, endpoint, and a 1 KiB body prefix. The recall
-sidecar is about 2.7 MiB on this sample, but an LLM only reads it if it needs a
-specific full body or header value.
+The default keeps the main file to about 96k tokens while retaining every item,
+header name, endpoint, and a 1 KiB body prefix. For comparison, the removed
+verbose format produced 2,485,776 tokens for this sample, so the default is about
+25.9x smaller. The recall sidecar is about 2.7 MiB on this sample, but an LLM only
+reads it if it needs a specific full body or header value.
 
 The format borrows the useful parts of RTK's TOON/minify-json/dedup/cap+recall
 ideas: schema once, deduplicate repeated structure, and make lossy previews
@@ -305,8 +290,7 @@ for strings and guess. For a schema-217 project it reads:
 
 Exchanges are deduplicated by SHA-256 of the exact request and response bytes. When
 the same exchange exists in several tools, the item keeps the higher-priority source
-(`proxy` > `repeater` > `site-map` > `unknown`) and lists the others in `also`
-(compact output) or `also_seen_in` (legacy output).
+(`proxy` > `repeater` > `site-map` > `unknown`) and lists the others in `also`.
 
 If the header or schema is not recognised, the structural parser is skipped and a
 byte-level HTTP carver is used. The carver also inspects zlib/gzip blobs, but it
@@ -418,9 +402,9 @@ main.go                         thin entrypoint; keeps `go install ...@latest` w
 internal/burp2json/
   doc.go                        package documentation
   app.go                        CLI flags, orchestration, output and chunk writing
-  compact.go                    b2j-sir/1 output, interning, recall sidecar
+  compact.go                    b2j/1 output, interning, recall sidecar
   progress.go                   terminal progress bar
-  model.go                      shared JSON types
+  model.go                      shared parser and output data types
   httpmsg.go                    HTTP parsing, body decoding, URL inference
   burp.go                       structural schema-217 heap parser
   carver.go                     fallback byte-level HTTP carver

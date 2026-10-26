@@ -325,7 +325,7 @@ func TestHeapHeaderAndExtraction(t *testing.T) {
 		t.Fatalf("cookie_header = %v", value)
 	}
 	if !reflect.DeepEqual(proxy.AlsoSeenIn, []string{"site-map"}) {
-		t.Fatalf("also_seen_in = %v", proxy.AlsoSeenIn)
+		t.Fatalf("also = %v", proxy.AlsoSeenIn)
 	}
 	duplicates := [][2]string{}
 	for _, header := range proxy.Request.Headers {
@@ -447,26 +447,35 @@ func TestCompactRedactionSidecar(t *testing.T) {
 func TestHostFilterAndChunking(t *testing.T) {
 	path, _ := buildTestProject(t)
 	out := filepath.Join(t.TempDir(), "all.json")
-	if code := run([]string{path, "-o", out, "--host", "example", "--max-body", "10", "--legacy-json"}); code != 0 {
+	if code := run([]string{path, "-o", out, "--host", "example", "--max-body", "10", "--no-progress"}); code != 0 {
 		t.Fatalf("run returned %d", code)
 	}
 	data, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var document Document
-	if err := json.Unmarshal(data, &document); err != nil {
+	var compact CompactDocument
+	if err := json.Unmarshal(data, &compact); err != nil {
 		t.Fatal(err)
 	}
-	if document.Meta.ItemCount != 3 || document.Summary == nil || document.Summary.Hosts["example.test"] != 3 {
-		t.Fatalf("document meta/summary = %d %#v", document.Meta.ItemCount, document.Summary)
+	if compact.Meta.Items != 3 || compact.Summary == nil || compact.Summary.Total != 3 {
+		t.Fatalf("meta/summary = %d %#v", compact.Meta.Items, compact.Summary)
+	}
+	hostCount := 0
+	for _, host := range compact.Summary.Hosts {
+		if len(host) > 1 && host[0] == "example.test" {
+			hostCount = int(host[1].(float64))
+		}
+	}
+	if hostCount != 3 {
+		t.Fatalf("example.test count = %d", hostCount)
 	}
 	truncated := false
-	for _, item := range document.Items {
-		if item.Request != nil && item.Request.BodyTruncated {
+	for _, item := range compact.Items {
+		if request, ok := item[9].([]any); ok && request[6] != nil {
 			truncated = true
 		}
-		if item.Response != nil && item.Response.BodyTruncated {
+		if response, ok := item[10].([]any); ok && response[5] != nil {
 			truncated = true
 		}
 	}
@@ -475,7 +484,7 @@ func TestHostFilterAndChunking(t *testing.T) {
 	}
 
 	chunkBase := filepath.Join(t.TempDir(), "chunked.json")
-	if code := run([]string{path, "-o", chunkBase, "--chunk-items", "2", "--no-summary", "--legacy-json"}); code != 0 {
+	if code := run([]string{path, "-o", chunkBase, "--chunk-items", "2", "--no-summary", "--no-progress"}); code != 0 {
 		t.Fatalf("chunk run returned %d", code)
 	}
 	part1 := filepath.Join(filepath.Dir(chunkBase), "chunked_part001.json")
@@ -486,12 +495,12 @@ func TestHostFilterAndChunking(t *testing.T) {
 		}
 	}
 	partData, _ := os.ReadFile(part1)
-	var part Document
+	var part CompactDocument
 	if err := json.Unmarshal(partData, &part); err != nil {
 		t.Fatal(err)
 	}
-	if part.Summary != nil || len(part.Items) != 2 || part.Meta.ItemCount != 2 {
-		t.Fatalf("part summary/items/meta = %v %d %d", part.Summary, len(part.Items), part.Meta.ItemCount)
+	if part.Summary != nil || len(part.Items) != 2 || part.Meta.Items != 2 {
+		t.Fatalf("part summary/items/meta = %v %d %d", part.Summary, len(part.Items), part.Meta.Items)
 	}
 }
 
@@ -668,7 +677,7 @@ func TestCompactChunking(t *testing.T) {
 }
 
 func TestCompactBase64UsesRecall(t *testing.T) {
-	document := &Document{
+	result := &Result{
 		Meta:         Meta{Tool: "burp2json", ItemCount: 1},
 		Collaborator: emptyCollaborator(""),
 		Repeater:     emptyRepeater(),
@@ -683,7 +692,7 @@ func TestCompactBase64UsesRecall(t *testing.T) {
 			},
 		}},
 	}
-	compact, recall := buildCompactDocument(document, compactOptions{
+	compact, recall := buildCompactDocument(result, compactOptions{
 		BodyPreview: 1024, HeaderMax: 512, RecallName: "base.recall.json",
 	})
 	if recall == nil || recall.Bodies["1p"] != "AQID" {
@@ -694,7 +703,7 @@ func TestCompactBase64UsesRecall(t *testing.T) {
 		t.Fatalf("response = %#v", response)
 	}
 
-	full, fullRecall := buildCompactDocument(document, compactOptions{
+	full, fullRecall := buildCompactDocument(result, compactOptions{
 		BodyPreview: 1024, HeaderMax: 512, KeepBase64: true,
 	})
 	if fullRecall != nil {

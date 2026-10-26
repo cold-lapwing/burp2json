@@ -14,18 +14,7 @@ import (
 	"time"
 )
 
-const version = "2.1.0"
-
-const aiInstructions = "This JSON was produced from a Burp Suite project by burp2json. 'summary' gives the " +
-	"application overview (hosts, endpoints, parameters, cookies, status codes, tech). " +
-	"'items' holds each HTTP request/response pair with ALL headers preserved " +
-	"(headers are [name, value] lists to keep order and duplicates). Bodies are UTF-8 text " +
-	"unless body_encoding is 'base64'. 'source_tool' is 'proxy', 'repeater', 'site-map' or " +
-	"'unknown'; 'also_seen_in' lists other Burp tools that stored the same exchange. " +
-	"'collaborator' contains payload domains and HTTP interactions recovered from the project. " +
-	"Review for: access control, IDOR, auth/session handling, injection points, CORS, " +
-	"security headers, information disclosure, and business-logic flaws. " +
-	"Values marked [REDACTED] were removed by the user before sharing."
+const version = "2.2.0"
 
 type cliOptions struct {
 	input       string
@@ -37,7 +26,6 @@ type cliOptions struct {
 	chunkItems  int
 	noSummary   bool
 	noProgress  bool
-	legacyJSON  bool
 	full        bool
 	bodyPreview int
 	headerMax   int
@@ -55,9 +43,9 @@ Input formats are auto-detected, or force one with --format:
   xml    Burp "Save items" XML export
   har    HAR file
 
-The default output is b2j-sir/1: a schema-once, positional-row JSON format with
-a global string table, flat header pairs, and a recall sidecar for values that
-were elided. Use --legacy-json for the old verbose shape.
+The output is b2j/1: a schema-once, positional-row JSON format with a global
+string table, flat header pairs, and a recall sidecar for values that were
+elided.
 
 Options:
   -o, --output PATH       output .json (default: <input>.json)
@@ -69,7 +57,6 @@ Options:
       --header-max BYTES  max bytes per interned header value/comment/title
                           (default: 512; 0 = full)
       --full              disable compact caps and base64 elision
-      --legacy-json       write the old verbose JSON document instead
       --host TEXT         keep only items whose host contains TEXT (repeatable)
       --redact            redact auth headers, cookies, JWTs, secret-looking fields
       --chunk-items N     split into files of N items each
@@ -86,7 +73,6 @@ Examples:
   burp2json --redact --chunk-items 50 project.burp -o review.json
   burp2json --host example.com proxy-export.xml
   burp2json --full project.burp -o full-compact.json
-  burp2json --legacy-json project.burp -o old-shape.json
 
 The input file is opened read-only and is never modified.
 Progress is shown on stderr for files of 1 MiB or more on interactive terminals.
@@ -191,8 +177,6 @@ func parseArgs(argv []string) (cliOptions, error) {
 			options.headerMax = number
 		case "--full":
 			options.full = true
-		case "--legacy-json":
-			options.legacyJSON = true
 		case "--host":
 			parsed, err := takeValue()
 			if err != nil {
@@ -309,7 +293,7 @@ func detectFormatData(path string, data []byte) string {
 	return "burp"
 }
 
-func writeJSON(path string, value any, pretty bool, progress *progressBar, start, end float64) error {
+func writeJSON(path string, value any, progress *progressBar, start, end float64) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
@@ -317,9 +301,6 @@ func writeJSON(path string, value any, pretty bool, progress *progressBar, start
 	progress.Update("Writing output", start)
 	encoder := json.NewEncoder(file)
 	encoder.SetEscapeHTML(false)
-	if pretty {
-		encoder.SetIndent("", "  ")
-	}
 	encodeErr := encoder.Encode(value)
 	closeErr := file.Close()
 	if encodeErr != nil {
@@ -335,14 +316,10 @@ func removeRecallSidecar(path string) {
 	_ = os.Remove(recallOutputPath(path))
 }
 
-func writeOutput(path string, document *Document, options cliOptions, progress *progressBar, start, end float64) error {
-	if options.legacyJSON {
-		removeRecallSidecar(path)
-		return writeJSON(path, document, true, progress, start, end)
-	}
+func writeOutput(path string, result *Result, options cliOptions, progress *progressBar, start, end float64) error {
 	progress.Update("Compacting output", start)
 	recallName := filepath.Base(recallOutputPath(path))
-	compact, recall := buildCompactDocument(document, compactOptions{
+	compact, recall := buildCompactDocument(result, compactOptions{
 		BodyPreview: options.bodyPreview,
 		HeaderMax:   options.headerMax,
 		KeepBase64:  options.full,
@@ -350,14 +327,14 @@ func writeOutput(path string, document *Document, options cliOptions, progress *
 	})
 	if recall == nil {
 		removeRecallSidecar(path)
-		return writeJSON(path, compact, false, progress, start, end)
+		return writeJSON(path, compact, progress, start, end)
 	}
 	split := start + (end-start)*0.8
-	if err := writeJSON(path, compact, false, progress, start, split); err != nil {
+	if err := writeJSON(path, compact, progress, start, split); err != nil {
 		return err
 	}
 	recallPath := recallOutputPath(path)
-	if err := writeJSON(recallPath, recall, false, progress, split, end); err != nil {
+	if err := writeJSON(recallPath, recall, progress, split, end); err != nil {
 		return err
 	}
 	return nil
@@ -501,40 +478,29 @@ func run(argv []string) int {
 			"then run this tool on the XML export.")
 	}
 
-	progress.Update("Building document", 94)
+	progress.Update("Building result", 94)
 	meta := makeMeta(options, method, format, data, items, extra, warnings)
-	document := &Document{
-		AIInstructions: aiInstructions,
-		Meta:           meta,
-		Collaborator:   extra.Collaborator,
-		Repeater:       extra.Repeater,
-		Intruder: map[string]any{
-			"recovered": false,
-			"note": "Intruder attack configuration, payload positions, payload lists and results are " +
-				"not stored in the Proxy heap path used here. Export them from Burp if needed.",
-		},
-		Scanner: map[string]any{
-			"recovered": false,
-			"note": "Scanner/audit items are not enumerated by this parser. The project root's " +
-				"Scanner Dashboard state exists, but task/item ownership is not mapped.",
-		},
-		Coverage: extra.Coverage,
-		Items:    items,
+	result := &Result{
+		Meta:         meta,
+		Collaborator: extra.Collaborator,
+		Repeater:     extra.Repeater,
+		Coverage:     extra.Coverage,
+		Items:        items,
 	}
 	if len(extra.Collaborator.Interactions) == 0 && extra.Collaborator.Note == "" {
-		document.Collaborator = emptyCollaborator("Collaborator data is only recovered from .burp input.")
+		result.Collaborator = emptyCollaborator("Collaborator data is only recovered from .burp input.")
 	}
-	if document.Repeater.Tabs == nil {
-		document.Repeater.Tabs = []Tab{}
+	if result.Repeater.Tabs == nil {
+		result.Repeater.Tabs = []Tab{}
 	}
-	if document.Repeater.Groups == nil {
-		document.Repeater.Groups = []Group{}
+	if result.Repeater.Groups == nil {
+		result.Repeater.Groups = []Group{}
 	}
-	if document.Coverage == nil {
-		document.Coverage = map[string]any{}
+	if result.Coverage == nil {
+		result.Coverage = map[string]any{}
 	}
 	if !options.noSummary {
-		document.Summary = buildSummary(items)
+		result.Summary = buildSummary(items)
 	}
 
 	outPath := options.output
@@ -557,37 +523,32 @@ func run(argv []string) int {
 			partMeta.Parts = parts
 			partMeta.ItemCount = end - start
 			partMeta.SourceToolCounts = sourceToolCounts(items[start:end])
-			partDocument := &Document{
-				AIInstructions: aiInstructions,
-				Meta:           partMeta,
-				Collaborator:   emptyCollaborator("see part 1"),
-				Repeater:       emptyRepeater(),
-				Intruder:       map[string]any{"recovered": false, "note": "see part 1"},
-				Scanner:        map[string]any{"recovered": false, "note": "see part 1"},
-				Coverage:       map[string]any{},
-				Items:          items[start:end],
+			partResult := &Result{
+				Meta:         partMeta,
+				Collaborator: emptyCollaborator("see part 1"),
+				Repeater:     emptyRepeater(),
+				Coverage:     map[string]any{},
+				Items:        items[start:end],
 			}
 			if partNumber == 1 {
 				if !options.noSummary {
-					partDocument.Summary = document.Summary
+					partResult.Summary = result.Summary
 				}
-				partDocument.Collaborator = document.Collaborator
-				partDocument.Repeater = document.Repeater
-				partDocument.Intruder = document.Intruder
-				partDocument.Scanner = document.Scanner
-				partDocument.Coverage = document.Coverage
+				partResult.Collaborator = result.Collaborator
+				partResult.Repeater = result.Repeater
+				partResult.Coverage = result.Coverage
 			}
 			path := fmt.Sprintf("%s_part%03d%s", base, partNumber, extension)
 			partStart := 94 + 6*float64(partIndex)/float64(parts)
 			partEnd := 94 + 6*float64(partNumber)/float64(parts)
-			if err := writeOutput(path, partDocument, options, progress, partStart, partEnd); err != nil {
+			if err := writeOutput(path, partResult, options, progress, partStart, partEnd); err != nil {
 				fmt.Fprintf(os.Stderr, "error writing %s: %s\n", path, err)
 				return 1
 			}
 			written = append(written, path)
 		}
 	} else {
-		if err := writeOutput(outPath, document, options, progress, 94, 100); err != nil {
+		if err := writeOutput(outPath, result, options, progress, 94, 100); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing %s: %s\n", outPath, err)
 			return 1
 		}
