@@ -19,7 +19,7 @@ data stays out of the main file.
 
 ## Demo
 
-![burp2json](demo.gif)
+![burp2json](Demo.gif)
 
 
 ## Features
