@@ -17,6 +17,11 @@ data stays out of the main file.
 > credentials, session tokens, personal data, and full response bodies. Review it
 > before sharing, and prefer `--redact` when sending it to a third party.
 
+## Demo
+
+![burp2json](demo.gif)
+
+
 ## Features
 
 - Reads Burp project files (`.burp`) structurally, without requiring Burp itself.
