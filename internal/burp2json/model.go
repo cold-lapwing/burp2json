@@ -1,4 +1,4 @@
-package main
+package burp2json
 
 // Shared data model. JSON field names are kept stable for existing consumers.
 

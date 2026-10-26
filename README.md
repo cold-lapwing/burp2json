@@ -414,20 +414,24 @@ Key format facts worth preserving:
 ## Repository layout
 
 ```text
-main.go       CLI, input reading, format detection, output and chunk writing
-compact.go    b2j-sir/1 compact output, string interning, recall sidecar
-progress.go   terminal progress bar
-model.go      shared JSON types
-httpmsg.go    HTTP parsing, body decoding, URL inference
-burp.go       structural schema-217 heap parser
-carver.go     fallback byte-level HTTP carver
-xmlhar.go     Burp XML and HAR readers
-transform.go  deduplication, finalisation, redaction, summary
-*_test.go     Go test suite and synthetic heap fixture
-go.mod        module and Brotli dependency
-scripts/token_count.py  tiktoken benchmark helper
-README.md     this document
-.gitignore    ignores .burp files, generated JSON, and build artifacts
+main.go                         thin entrypoint; keeps `go install ...@latest` working
+internal/burp2json/
+  doc.go                        package documentation
+  app.go                        CLI flags, orchestration, output and chunk writing
+  compact.go                    b2j-sir/1 output, interning, recall sidecar
+  progress.go                   terminal progress bar
+  model.go                      shared JSON types
+  httpmsg.go                    HTTP parsing, body decoding, URL inference
+  burp.go                       structural schema-217 heap parser
+  carver.go                     fallback byte-level HTTP carver
+  xmlhar.go                     Burp XML and HAR readers
+  transform.go                  deduplication, finalisation, redaction, summary
+  *_test.go                     package tests and synthetic heap fixture
+testdata/                       local-only fixtures (ignored by Git)
+scripts/token_count.py          tiktoken benchmark helper
+go.mod / go.sum                 module and Brotli dependency
+README.md                       this document
+.gitignore                      ignores engagement data, generated JSON, build artifacts
 ```
 
 ## License

@@ -1,4 +1,4 @@
-package main
+package burp2json
 
 import (
 	"bytes"

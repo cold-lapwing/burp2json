@@ -1,4 +1,4 @@
-package main
+package burp2json
 
 import (
 	"bytes"
@@ -923,9 +923,9 @@ func TestSummary(t *testing.T) {
 }
 
 func TestRealSample(t *testing.T) {
-	path := filepath.Join(".", "2026-10-22-burp2jsonew.burp")
+	path := filepath.Join("..", "..", "testdata", "real-sample.burp")
 	if _, err := os.Stat(path); err != nil {
-		t.Skip("real .burp sample is not present")
+		t.Skip("testdata/real-sample.burp is not present")
 	}
 	warnings := []string{}
 	raw, method, extra := readBurp(path, 200_000, &warnings)

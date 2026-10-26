@@ -1,0 +1,623 @@
+package burp2json
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const version = "2.1.0"
+
+const aiInstructions = "This JSON was produced from a Burp Suite project by burp2json. 'summary' gives the " +
+	"application overview (hosts, endpoints, parameters, cookies, status codes, tech). " +
+	"'items' holds each HTTP request/response pair with ALL headers preserved " +
+	"(headers are [name, value] lists to keep order and duplicates). Bodies are UTF-8 text " +
+	"unless body_encoding is 'base64'. 'source_tool' is 'proxy', 'repeater', 'site-map' or " +
+	"'unknown'; 'also_seen_in' lists other Burp tools that stored the same exchange. " +
+	"'collaborator' contains payload domains and HTTP interactions recovered from the project. " +
+	"Review for: access control, IDOR, auth/session handling, injection points, CORS, " +
+	"security headers, information disclosure, and business-logic flaws. " +
+	"Values marked [REDACTED] were removed by the user before sharing."
+
+type cliOptions struct {
+	input       string
+	output      string
+	format      string
+	maxBody     int
+	hosts       []string
+	redact      bool
+	chunkItems  int
+	noSummary   bool
+	noProgress  bool
+	legacyJSON  bool
+	full        bool
+	bodyPreview int
+	headerMax   int
+	help        bool
+}
+
+func usage(w io.Writer) {
+	fmt.Fprint(w, `burp2json - convert Burp Suite data to token-efficient JSON for LLMs
+
+Usage:
+  burp2json [options] INPUT
+
+Input formats are auto-detected, or force one with --format:
+  burp   Burp Suite project file (.burp)
+  xml    Burp "Save items" XML export
+  har    HAR file
+
+The default output is b2j-sir/1: a schema-once, positional-row JSON format with
+a global string table, flat header pairs, and a recall sidecar for values that
+were elided. Use --legacy-json for the old verbose shape.
+
+Options:
+  -o, --output PATH       output .json (default: <input>.json)
+      --format FORMAT     burp, xml, or har
+      --max-body BYTES    max bytes of each body to keep (default: 200000)
+      --body-preview BYTES
+                          bytes of each body kept inline (default: 1024;
+                          0 = full text; base64 still needs --full)
+      --header-max BYTES  max bytes per interned header value/comment/title
+                          (default: 512; 0 = full)
+      --full              disable compact caps and base64 elision
+      --legacy-json       write the old verbose JSON document instead
+      --host TEXT         keep only items whose host contains TEXT (repeatable)
+      --redact            redact auth headers, cookies, JWTs, secret-looking fields
+      --chunk-items N     split into files of N items each
+      --no-summary        omit the summary object
+      --no-progress       disable the progress bar
+  -h, --help              show this help
+
+When compact mode elides a value (body/header preview or base64 body), burp2json
+writes a <output>.recall.json sidecar with the full values. The main file still
+contains every item, endpoint, header name, and a body prefix.
+
+Examples:
+  burp2json project.burp
+  burp2json --redact --chunk-items 50 project.burp -o review.json
+  burp2json --host example.com proxy-export.xml
+  burp2json --full project.burp -o full-compact.json
+  burp2json --legacy-json project.burp -o old-shape.json
+
+The input file is opened read-only and is never modified.
+Progress is shown on stderr for files of 1 MiB or more on interactive terminals.
+Use --no-progress to disable it.
+Use only on data from targets you are authorised to test.
+`)
+}
+
+func parseArgs(argv []string) (cliOptions, error) {
+	options := cliOptions{
+		maxBody:     200_000,
+		bodyPreview: defaultBodyPreview,
+		headerMax:   defaultHeaderMax,
+	}
+	haveInput := false
+	for index := 0; index < len(argv); index++ {
+		arg := argv[index]
+		if arg == "--" {
+			for _, rest := range argv[index+1:] {
+				if haveInput {
+					return options, fmt.Errorf("unexpected extra argument %q", rest)
+				}
+				options.input = rest
+				haveInput = true
+			}
+			break
+		}
+		if arg == "-h" || arg == "--help" {
+			options.help = true
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			if haveInput {
+				return options, fmt.Errorf("unexpected extra argument %q", arg)
+			}
+			options.input = arg
+			haveInput = true
+			continue
+		}
+		name := arg
+		value := ""
+		hasValue := false
+		if equal := strings.IndexByte(arg, '='); equal >= 0 {
+			name, value, hasValue = arg[:equal], arg[equal+1:], true
+		}
+		takeValue := func() (string, error) {
+			if hasValue {
+				return value, nil
+			}
+			index++
+			if index >= len(argv) {
+				return "", fmt.Errorf("option %s requires a value", name)
+			}
+			return argv[index], nil
+		}
+		switch name {
+		case "-o", "--output":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			options.output = parsed
+		case "--format":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			parsed = strings.ToLower(parsed)
+			if parsed != "burp" && parsed != "xml" && parsed != "har" {
+				return options, fmt.Errorf("--format must be burp, xml, or har")
+			}
+			options.format = parsed
+		case "--max-body":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			number, err := strconv.Atoi(parsed)
+			if err != nil {
+				return options, fmt.Errorf("--max-body must be an integer")
+			}
+			options.maxBody = number
+		case "--body-preview":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			number, err := strconv.Atoi(parsed)
+			if err != nil {
+				return options, fmt.Errorf("--body-preview must be an integer")
+			}
+			options.bodyPreview = number
+		case "--header-max":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			number, err := strconv.Atoi(parsed)
+			if err != nil {
+				return options, fmt.Errorf("--header-max must be an integer")
+			}
+			options.headerMax = number
+		case "--full":
+			options.full = true
+		case "--legacy-json":
+			options.legacyJSON = true
+		case "--host":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			options.hosts = append(options.hosts, parsed)
+		case "--redact":
+			options.redact = true
+		case "--chunk-items":
+			parsed, err := takeValue()
+			if err != nil {
+				return options, err
+			}
+			number, err := strconv.Atoi(parsed)
+			if err != nil {
+				return options, fmt.Errorf("--chunk-items must be an integer")
+			}
+			options.chunkItems = number
+		case "--no-summary":
+			options.noSummary = true
+		case "--no-progress":
+			options.noProgress = true
+		default:
+			return options, fmt.Errorf("unknown option %q", arg)
+		}
+	}
+	if options.help {
+		return options, nil
+	}
+	if options.input == "" {
+		return options, fmt.Errorf("input file is required")
+	}
+	if options.maxBody < 0 {
+		return options, fmt.Errorf("--max-body must be >= 0")
+	}
+	if options.bodyPreview < 0 {
+		return options, fmt.Errorf("--body-preview must be >= 0")
+	}
+	if options.headerMax < 0 {
+		return options, fmt.Errorf("--header-max must be >= 0")
+	}
+	if options.chunkItems < 0 {
+		return options, fmt.Errorf("--chunk-items must be >= 0")
+	}
+	if options.full {
+		options.bodyPreview = 0
+		options.headerMax = 0
+	}
+	return options, nil
+}
+
+func readInputFile(path string, progress *progressBar) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if progress == nil || !progress.enabled {
+		return io.ReadAll(file)
+	}
+
+	total := info.Size()
+	progress.Bytes("Reading input", 0, total, 0, 20)
+	var out bytes.Buffer
+	if total > 0 && total <= int64(^uint(0)>>1) {
+		out.Grow(int(total))
+	}
+	buffer := make([]byte, 1<<20)
+	var done int64
+	for {
+		count, readErr := file.Read(buffer)
+		if count > 0 {
+			_, _ = out.Write(buffer[:count])
+			done += int64(count)
+			progress.Bytes("Reading input", done, total, 0, 20)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+	return out.Bytes(), nil
+}
+
+func detectFormatData(path string, data []byte) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".burp":
+		return "burp"
+	case ".har":
+		return "har"
+	case ".xml":
+		return "xml"
+	}
+	head := data
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	head = bytes.TrimLeft(head, " \t\r\n")
+	if bytes.HasPrefix(head, []byte("<?xml")) || bytes.HasPrefix(head, []byte("<items")) {
+		return "xml"
+	}
+	if bytes.HasPrefix(head, []byte("{")) {
+		return "har"
+	}
+	if len(head) >= 4 && head[0] == 0x66 && head[1] == 0x85 && head[2] == 0x82 && head[3] == 0x80 {
+		return "burp"
+	}
+	return "burp"
+}
+
+func writeJSON(path string, value any, pretty bool, progress *progressBar, start, end float64) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	progress.Update("Writing output", start)
+	encoder := json.NewEncoder(file)
+	encoder.SetEscapeHTML(false)
+	if pretty {
+		encoder.SetIndent("", "  ")
+	}
+	encodeErr := encoder.Encode(value)
+	closeErr := file.Close()
+	if encodeErr != nil {
+		return encodeErr
+	}
+	if closeErr == nil {
+		progress.Update("Writing output", end)
+	}
+	return closeErr
+}
+
+func removeRecallSidecar(path string) {
+	_ = os.Remove(recallOutputPath(path))
+}
+
+func writeOutput(path string, document *Document, options cliOptions, progress *progressBar, start, end float64) error {
+	if options.legacyJSON {
+		removeRecallSidecar(path)
+		return writeJSON(path, document, true, progress, start, end)
+	}
+	progress.Update("Compacting output", start)
+	recallName := filepath.Base(recallOutputPath(path))
+	compact, recall := buildCompactDocument(document, compactOptions{
+		BodyPreview: options.bodyPreview,
+		HeaderMax:   options.headerMax,
+		KeepBase64:  options.full,
+		RecallName:  recallName,
+	})
+	if recall == nil {
+		removeRecallSidecar(path)
+		return writeJSON(path, compact, false, progress, start, end)
+	}
+	split := start + (end-start)*0.8
+	if err := writeJSON(path, compact, false, progress, start, split); err != nil {
+		return err
+	}
+	recallPath := recallOutputPath(path)
+	if err := writeJSON(recallPath, recall, false, progress, split, end); err != nil {
+		return err
+	}
+	return nil
+}
+
+func sourceToolCounts(items []Item) map[string]int {
+	counts := map[string]int{}
+	for _, item := range items {
+		source := item.SourceTool
+		if source == "" {
+			source = "unknown"
+		}
+		counts[source]++
+	}
+	return counts
+}
+
+func filterByHost(items []Item, hosts []string) []Item {
+	if len(hosts) == 0 {
+		return items
+	}
+	out := []Item{}
+	for _, item := range items {
+		if item.Host == nil {
+			continue
+		}
+		host := strings.ToLower(*item.Host)
+		for _, wanted := range hosts {
+			if strings.Contains(host, strings.ToLower(wanted)) {
+				item.ID = len(out) + 1
+				out = append(out, item)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func makeBurpInfo(extra *ExtractionResult) *BurpInfo {
+	if extra == nil || extra.Header == nil {
+		return nil
+	}
+	header := extra.Header
+	return &BurpInfo{
+		Magic:           fmt.Sprintf("0x%08x", header.Magic),
+		OuterVersion:    int(header.OuterVersion),
+		Compatibility:   fmt.Sprintf("0x%08x", uint32(header.Compatibility)),
+		SchemaFloor:     int(header.SchemaFloor),
+		SchemaCurrent:   int(header.SchemaCurrent),
+		ProjectName:     extra.ProjectName,
+		BurpVersion:     nil,
+		BurpVersionNote: "Burp project files store a format schema, not the exact Burp release. schema_current is reported instead.",
+	}
+}
+
+func makeMeta(options cliOptions, method, format string, data []byte, items []Item, extra *ExtractionResult, warnings []string) Meta {
+	if warnings == nil {
+		warnings = []string{}
+	}
+	sum := sha256.Sum256(data)
+	return Meta{
+		Tool:             "burp2json",
+		ToolVersion:      version,
+		SourceFile:       filepath.Base(options.input),
+		SourceSHA256:     hex.EncodeToString(sum[:]),
+		SourceSize:       int64(len(data)),
+		InputFormat:      format,
+		ExtractionMethod: method,
+		GeneratedAt:      time.Now().UTC().Format("2006-01-02T15:04:05.000000+00:00"),
+		ReadOnly:         true,
+		ItemCount:        len(items),
+		SourceToolCounts: sourceToolCounts(items),
+		Redacted:         options.redact,
+		Burp:             makeBurpInfo(extra),
+		Warnings:         warnings,
+	}
+}
+
+func run(argv []string) int {
+	options, err := parseArgs(argv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, "Try 'burp2json --help' for usage.")
+		return 2
+	}
+	if options.help {
+		usage(os.Stdout)
+		return 0
+	}
+	info, err := os.Stat(options.input)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: input file not found: %s\n", options.input)
+		return 2
+	}
+	if info.IsDir() {
+		fmt.Fprintf(os.Stderr, "error: input is a directory: %s\n", options.input)
+		return 2
+	}
+
+	progress := newProgressBar(progressEnabled(info, options.noProgress))
+	defer progress.Close()
+	data, err := readInputFile(options.input, progress)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+
+	format := options.format
+	if format == "" {
+		format = detectFormatData(options.input, data)
+	}
+	warnings := []string{}
+	extra := &ExtractionResult{
+		Collaborator: emptyCollaborator("Collaborator data is only recovered from .burp input."),
+		Repeater:     emptyRepeater(),
+		Coverage:     map[string]any{},
+	}
+	var rawItems []*Exchange
+	var method string
+	switch format {
+	case "burp":
+		rawItems, method, extra = readBurpData(data, options.maxBody, &warnings, progress)
+	case "xml":
+		rawItems, method = readXMLData(data, options.maxBody, &warnings, progress)
+	case "har":
+		rawItems, method = readHARData(data, options.maxBody, &warnings, progress)
+	}
+	progress.Update("Finalizing items", 90)
+	if format == "burp" && method == "burp-heap" {
+		rawItems = mergeExchanges(rawItems)
+	}
+	items := finalizeItems(rawItems, options.maxBody)
+	items = filterByHost(items, options.hosts)
+	if options.redact {
+		redactItems(items)
+		redactCollaborator(&extra.Collaborator)
+	}
+	if len(items) == 0 {
+		warnings = append(warnings, "NO HTTP items recovered. Try opening the project in Burp and using "+
+			"Proxy > HTTP history > select all > right-click > Save items (XML), "+
+			"then run this tool on the XML export.")
+	}
+
+	progress.Update("Building document", 94)
+	meta := makeMeta(options, method, format, data, items, extra, warnings)
+	document := &Document{
+		AIInstructions: aiInstructions,
+		Meta:           meta,
+		Collaborator:   extra.Collaborator,
+		Repeater:       extra.Repeater,
+		Intruder: map[string]any{
+			"recovered": false,
+			"note": "Intruder attack configuration, payload positions, payload lists and results are " +
+				"not stored in the Proxy heap path used here. Export them from Burp if needed.",
+		},
+		Scanner: map[string]any{
+			"recovered": false,
+			"note": "Scanner/audit items are not enumerated by this parser. The project root's " +
+				"Scanner Dashboard state exists, but task/item ownership is not mapped.",
+		},
+		Coverage: extra.Coverage,
+		Items:    items,
+	}
+	if len(extra.Collaborator.Interactions) == 0 && extra.Collaborator.Note == "" {
+		document.Collaborator = emptyCollaborator("Collaborator data is only recovered from .burp input.")
+	}
+	if document.Repeater.Tabs == nil {
+		document.Repeater.Tabs = []Tab{}
+	}
+	if document.Repeater.Groups == nil {
+		document.Repeater.Groups = []Group{}
+	}
+	if document.Coverage == nil {
+		document.Coverage = map[string]any{}
+	}
+	if !options.noSummary {
+		document.Summary = buildSummary(items)
+	}
+
+	outPath := options.output
+	if outPath == "" {
+		outPath = options.input + ".json"
+	}
+	written := []string{}
+	if options.chunkItems > 0 && len(items) > options.chunkItems {
+		parts := (len(items) + options.chunkItems - 1) / options.chunkItems
+		base, extension := splitOutputPath(outPath)
+		for partIndex := 0; partIndex < parts; partIndex++ {
+			start := partIndex * options.chunkItems
+			end := start + options.chunkItems
+			if end > len(items) {
+				end = len(items)
+			}
+			partNumber := partIndex + 1
+			partMeta := meta
+			partMeta.Part = partNumber
+			partMeta.Parts = parts
+			partMeta.ItemCount = end - start
+			partMeta.SourceToolCounts = sourceToolCounts(items[start:end])
+			partDocument := &Document{
+				AIInstructions: aiInstructions,
+				Meta:           partMeta,
+				Collaborator:   emptyCollaborator("see part 1"),
+				Repeater:       emptyRepeater(),
+				Intruder:       map[string]any{"recovered": false, "note": "see part 1"},
+				Scanner:        map[string]any{"recovered": false, "note": "see part 1"},
+				Coverage:       map[string]any{},
+				Items:          items[start:end],
+			}
+			if partNumber == 1 {
+				if !options.noSummary {
+					partDocument.Summary = document.Summary
+				}
+				partDocument.Collaborator = document.Collaborator
+				partDocument.Repeater = document.Repeater
+				partDocument.Intruder = document.Intruder
+				partDocument.Scanner = document.Scanner
+				partDocument.Coverage = document.Coverage
+			}
+			path := fmt.Sprintf("%s_part%03d%s", base, partNumber, extension)
+			partStart := 94 + 6*float64(partIndex)/float64(parts)
+			partEnd := 94 + 6*float64(partNumber)/float64(parts)
+			if err := writeOutput(path, partDocument, options, progress, partStart, partEnd); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing %s: %s\n", path, err)
+				return 1
+			}
+			written = append(written, path)
+		}
+	} else {
+		if err := writeOutput(outPath, document, options, progress, 94, 100); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing %s: %s\n", outPath, err)
+			return 1
+		}
+		written = append(written, outPath)
+	}
+	progress.Done()
+
+	fmt.Fprintf(os.Stderr, "method=%s items=%d\n", method, len(items))
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, "warning: "+warning)
+	}
+	for _, path := range written {
+		fmt.Println(path)
+	}
+	return 0
+}
+
+func splitOutputPath(path string) (string, string) {
+	extension := filepath.Ext(path)
+	base := strings.TrimSuffix(path, extension)
+	if base == "" {
+		base = path
+	}
+	if extension == "" {
+		extension = ".json"
+	}
+	return base, extension
+}
+
+// Run executes the CLI and returns the process exit code.
+func Run(argv []string) int {
+	return run(argv)
+}
